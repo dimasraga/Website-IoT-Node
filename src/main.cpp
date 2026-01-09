@@ -1947,11 +1947,11 @@ void handleEthernetClient()
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: application/json");
       client.println("Access-Control-Allow-Origin: *");
-      client.println("Cache-Control: no-store, no-cache, must-revalidate"); 
+      client.println("Cache-Control: no-store, no-cache, must-revalidate");
       client.println("Connection: close");
       client.println();
 
-      // --- 1. GET VALUE 
+      // --- 1. GET VALUE
       if (basePath == "/getValue")
       {
         if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100)))
@@ -1976,7 +1976,7 @@ void handleEthernetClient()
         }
         else
         {
-          client.print("[]"); 
+          client.print("[]");
         }
       }
 
@@ -2945,7 +2945,7 @@ void Task_DataLogger(void *parameter)
       {
         if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(500)))
         {
-          if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(3000))) 
+          if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(3000)))
           {
             sendBackupData();
             xSemaphoreGive(spiMutex);
@@ -2967,7 +2967,7 @@ void Task_DataLogger(void *parameter)
 void setup()
 {
   Serial.begin(115200);
-  delay(1000); 
+  delay(1000);
 
   Serial.println("SYSTEM BOOT START");
   esp_task_wdt_init(60, true);
@@ -4778,7 +4778,7 @@ void handleFormSubmit(AsyncWebServerRequest *request)
 
   //   // Simpan ke Internal & SD Card
   //   saveToJson("/configDigital.json", "digital");
-  //   saveToSDConfig("/configDigital.json", "digital"); // <--- 
+  //   saveToSDConfig("/configDigital.json", "digital"); // <---
   // }
 
   else if (request->hasArg("nameDI"))
@@ -4874,7 +4874,7 @@ void handleFormSubmit(AsyncWebServerRequest *request)
 
     // Simpan ke Internal & SD Card
     saveToJson("/configAnalog.json", "analog");
-    saveToSDConfig("/configAnalog.json", "analog"); // <--- 
+    saveToSDConfig("/configAnalog.json", "analog"); // <---
   }
 
   // ========================================================================
@@ -4899,7 +4899,7 @@ void handleFormSubmit(AsyncWebServerRequest *request)
 
     // Simpan ke Internal & SD Card
     saveToJson("/modbusSetup.json", "modbusSetup");
-    saveToSDConfig("/modbusSetup.json", "modbusSetup"); // <--- 
+    saveToSDConfig("/modbusSetup.json", "modbusSetup"); // <---
   }
 
   // ========================================================================
@@ -4930,7 +4930,7 @@ void handleFormSubmit(AsyncWebServerRequest *request)
 
     // Simpan ke Internal & SD Card
     saveToJson("/systemSettings.json", "systemSettings");
-    saveToSDConfig("/systemSettings.json", "systemSettings"); // <--- 
+    saveToSDConfig("/systemSettings.json", "systemSettings"); // <---
   }
   else
   {
