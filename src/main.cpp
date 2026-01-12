@@ -2388,9 +2388,10 @@ void Task_DataAcquisition(void *parameter)
   unsigned long lastRunTimeCheck = 0;
   unsigned long lastDebugPrint = 0;
   int16_t valueADC;
+
   while (true)
   {
-    // --- Definisi variabel Modbus (digunakan di Analog & Digital) ---
+    // --- Definisi variabel Modbus (digunakan di Analog & Digital) --
     bool useTCP = (networkSettings.protocolMode2.indexOf("TCP") >= 0);
     bool useRTU = (networkSettings.protocolMode2.indexOf("RTU") >= 0);
 
@@ -2401,18 +2402,18 @@ void Task_DataAcquisition(void *parameter)
     {
       if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)))
       {
-        // --- [ MULAI KODE BARU DARI ANDA ] ---
+        // --- [ KODE BARU DARI ANDA ] ---
         for (byte i = 1; i < jumlahInputAnalog + 1; i++)
         {
           valueADC = ads.readADC(i - 1);
 
-          // Filter Logic
+          // 1. Filter Logic
           if (analogInput[i].filter)
             analogInput[i].adcValue = filterSensor(valueADC, analogInput[i].adcValue, analogInput[i].filterPeriod);
           else
             analogInput[i].adcValue = valueADC;
 
-          // Mapping Logic (Sesuai Request)
+          // 2. Mapping Logic (Sesuai Request)
           if (analogInput[i].inputType == "4-20 mA")
           {
             if (analogInput[i].scaling)
@@ -2425,38 +2426,35 @@ void Task_DataAcquisition(void *parameter)
             if (analogInput[i].scaling)
               analogInput[i].mapValue = mapFloat(analogInput[i].adcValue, 0.0, 26666.67, analogInput[i].lowLimit, analogInput[i].highLimit);
             else
-              analogInput[i].mapValue = mapFloat(analogInput[i].adcValue, 0.0, 26666.67, 0.0, 20.0);
+              analogInput[i].mapValue = mapFloat(analogInput[i].adcValue, 0.0, 26666.67, 0.0, 20.0); // 20mA=5V
           }
           else
           {
+            // Default (0-10V atau voltage divider lain)
             if (analogInput[i].scaling)
               analogInput[i].mapValue = mapFloat(analogInput[i].adcValue, 0.0, 26666.67, analogInput[i].lowLimit, analogInput[i].highLimit);
             else
               analogInput[i].mapValue = mapFloat(analogInput[i].adcValue, 0.0, 26666.67, 0.0, 10.0);
           }
 
-          // Kalibrasi Linear (mX + c) jika aktif
-          if (analogInput[i].calibration && analogInput[i].scaling)
-          {
-            float slope = (analogInput[i].mValue != 0) ? analogInput[i].mValue : 1.0;
-            analogInput[i].mapValue = (analogInput[i].mapValue * slope) + analogInput[i].cValue;
-          }
-
-          // Masukkan ke struct data untuk dikirim ke Task Logger
-          sensorData.analogValues[i] = analogInput[i].mapValue;
-
-          // Update Register Modbus Slave (Agar bisa dibaca PLC/SCADA lain)
+          // 3. Update Modbus Registers
           if (useTCP)
           {
-            mbIP.Ireg(i + 9, (int)analogInput[i].adcValue);         // Register Raw
-            mbIP.Ireg(i - 1, (int)(analogInput[i].mapValue * 100)); // Register Value
+            mbIP.Ireg(i + 9, analogInput[i].adcValue);       // Reg 10-13 (Raw)
+            mbIP.Ireg(i - 1, analogInput[i].mapValue * 100); // Reg 0-3 (Value * 100)
           }
+
           if (useRTU)
           {
-            mbRTU.Ireg(i + 9, (int)analogInput[i].adcValue);
-            mbRTU.Ireg(i - 1, (int)(analogInput[i].mapValue * 100));
+            mbRTU.Ireg(i + 9, analogInput[i].adcValue);       // Reg 10-13 (Raw)
+            mbRTU.Ireg(i - 1, analogInput[i].mapValue * 100); // Reg 0-3 (Value * 100)
           }
+
+          // [PENTING] Simpan data agar terkirim ke Web Dashboard & MQTT
+          sensorData.analogValues[i] = analogInput[i].mapValue;
         }
+        // --- [ SELESAI KODE BARU ] ---
+
         xSemaphoreGive(i2cMutex);
       }
       lastReadAnalog = millis();
@@ -2470,7 +2468,7 @@ void Task_DataAcquisition(void *parameter)
         int pinTrig = 0;
 
         // 1. Data Logger Trigger Logic
-        if (networkSettings.sendTrig != "Timer/interval") // Koreksi typo: biasanya "Timer/interval"
+        if (networkSettings.sendTrig != "Timer/interval")
         {
           // Parsing trig (misal "DI1" -> ambil angka 1)
           if (networkSettings.sendTrig.length() >= 3)
@@ -2568,58 +2566,68 @@ void Task_DataAcquisition(void *parameter)
     // ------------------------------------------------------------------------
     if (millis() - lastDebugPrint >= 2000)
     {
-      Serial.println("\n--- [ ANALOG INPUT ] ---");
+      Serial.println("\n=== ANALOG INPUT MONITOR ===");
+      Serial.println("ID | Name            | Value    | Raw   | Volt  | mA    | Type");
+      Serial.println("---|-----------------|----------|-------|-------|-------|----------");
+
       for (int i = 1; i <= jumlahInputAnalog; i++)
       {
-        float displayMA;
-        if (analogInput[i].inputType.indexOf("mA") >= 0)
-        {
-          // Jika mA, hitung pakai rumus Shunt Resistor (250 Ohm -> 20mA = 5V)
-          // ADC 26666 = 5V = 20mA
-          displayMA = (analogInput[i].adcValue / 26666.67) * 20.0;
-        }
-        else
-        {
-          // Jika bukan mA (berarti 0-10 V atau 0-5 V)
-          // ADC 26666 = 5V. Jika input 0-10V menggunakan voltage divider (misal 2:1), sesuaikan pengali ini.
-          // Default asumsi input langsung:
-          displayMA = (analogInput[i].adcValue / 26666.67) * 10.0;
-        } // Menggunakan String() biasa lebih aman daripada printf float kompleks jika stack terbatas
-        Serial.print("AI-");
-        Serial.print(i);
-        Serial.print(" | Val: ");
-        Serial.print(analogInput[i].mapValue, 2);
-        Serial.print(" | Raw: ");
-        Serial.print(analogInput[i].adcValue);
-        Serial.print(" | Type: ");
-        Serial.println(analogInput[i].inputType);
-        // Serial.print(" | mA: ");
-        // // Serial.println(analogInput[i].adcValue / 65535.0 * 20.0, 2);
-        // Serial.println(displayMA, 2);
-        if (analogInput[i].inputType.indexOf("mA") >= 0)
-        {
-          Serial.print(" | mA: ");
-        }
-        else
-        {
-          Serial.print(" | V : "); // Ubah label jadi V
-        }
-        Serial.println(displayMA, 2);
-      }
-      Serial.println("\n=== DIGITAL INPUT STATUS ===");
-      for (int i = 1; i <= jumlahInputDigital; i++)
-      {
-        int rawState = digitalRead(digitalInput[i].pin); // BACA LANGSUNG DARI PIN
+        // ========================================================================
+        // STEP 1: HITUNG TEGANGAN (Voltage)
+        // ========================================================================
+        // ADS1115 Gain 0 = ±6.144V, 16-bit (32767 = +6.144V, -32768 = -6.144V)
+        // Resolusi = 6.144 / 32768 = 0.0001875 V/bit
+        float voltageDisplay = analogInput[i].adcValue * 0.0001875;
 
-        Serial.printf("DI-%d [%s]: %.2f | RAW: %d | Mode: %s\n",
-                      i,
-                      digitalInput[i].name.c_str(),    // Nama Sensor
-                      digitalInput[i].value,           // Nilai Hasil Olahan (Counting/Timer/dll)
-                      rawState,                        // Nilai Fisik Asli (0 atau 1)
-                      digitalInput[i].taskMode.c_str() // Konfigurasi Task
-        );
+        // ========================================================================
+        // STEP 2: HITUNG ARUS (mA) - TERGANTUNG TIPE SENSOR
+        // ========================================================================
+        float maDisplay = 0.0;
+
+        if (analogInput[i].inputType == "4-20 mA")
+        {
+          // 4mA = 1V (dari resistor 250Î© shunt)
+          // 20mA = 5V
+          // Formula: mA = (Voltage / 250Î©) * 1000
+          // Atau lebih sederhana: mA = Voltage / 0.25
+          maDisplay = voltageDisplay / 0.25;
+
+          // Batasi range agar tidak keluar 4-20mA
+          if (maDisplay < 4.0)
+            maDisplay = 4.0;
+          if (maDisplay > 20.0)
+            maDisplay = 20.0;
+        }
+        else if (analogInput[i].inputType == "0-20 mA")
+        {
+          // 0mA = 0V
+          // 20mA = 5V (resistor 250Î©)
+          maDisplay = voltageDisplay / 0.25;
+
+          // Batasi range
+          if (maDisplay < 0.0)
+            maDisplay = 0.0;
+          if (maDisplay > 20.0)
+            maDisplay = 20.0;
+        }
+        else if (analogInput[i].inputType == "0-10 V")
+        {
+          // Ini bukan sensor arus, jadi mA = N/A
+          maDisplay = 0.0; // Atau bisa diisi NaN
+        }
+
+        // ========================================================================
+        // STEP 3: PRINT KE SERIAL (Format Tabel Rapi)
+        // ========================================================================
+        Serial.printf("A%-2d| %-15s | %8.2f | %5.0f | %5.2fV | %5.2f | %s\n",
+              i,
+              analogInput[i].name.c_str(),
+              analogInput[i].mapValue, 
+              analogInput[i].adcValue, // <<-- Ini Float, harus pakai %f
+              voltageDisplay,          
+              maDisplay,               
+              analogInput[i].inputType.c_str());
       }
-      Serial.println("============================");
       lastDebugPrint = millis();
     }
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -4778,7 +4786,7 @@ void handleFormSubmit(AsyncWebServerRequest *request)
 
   //   // Simpan ke Internal & SD Card
   //   saveToJson("/configDigital.json", "digital");
-  //   saveToSDConfig("/configDigital.json", "digital"); // <---
+  //   saveToSDConfig("/configDigital.json", "digital");
   // }
 
   else if (request->hasArg("nameDI"))
@@ -4874,7 +4882,7 @@ void handleFormSubmit(AsyncWebServerRequest *request)
 
     // Simpan ke Internal & SD Card
     saveToJson("/configAnalog.json", "analog");
-    saveToSDConfig("/configAnalog.json", "analog"); // <---
+    saveToSDConfig("/configAnalog.json", "analog");
   }
 
   // ========================================================================
@@ -4899,7 +4907,7 @@ void handleFormSubmit(AsyncWebServerRequest *request)
 
     // Simpan ke Internal & SD Card
     saveToJson("/modbusSetup.json", "modbusSetup");
-    saveToSDConfig("/modbusSetup.json", "modbusSetup"); // <---
+    saveToSDConfig("/modbusSetup.json", "modbusSetup");
   }
 
   // ========================================================================
@@ -4930,7 +4938,7 @@ void handleFormSubmit(AsyncWebServerRequest *request)
 
     // Simpan ke Internal & SD Card
     saveToJson("/systemSettings.json", "systemSettings");
-    saveToSDConfig("/systemSettings.json", "systemSettings"); // <---
+    saveToSDConfig("/systemSettings.json", "systemSettings");
   }
   else
   {
