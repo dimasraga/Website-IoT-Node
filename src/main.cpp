@@ -49,6 +49,7 @@ SemaphoreHandle_t i2cMutex;
 SemaphoreHandle_t sdMutex;
 SemaphoreHandle_t jsonMutex;
 SemaphoreHandle_t modbusMutex;
+SemaphoreHandle_t serialMutex;
 // ============================================================================
 // GLOBAL OBJECTS
 // ============================================================================
@@ -2415,38 +2416,57 @@ void Task_DataAcquisition(void *parameter)
       {
         for (byte i = 1; i < jumlahInputAnalog + 1; i++)
         {
-          valueADC = ads.readADC(i - 1);
+          // 1. BACA NILAI FISIK ASLI (Native ADS1115)
+          // Range asli: ~5333 (4mA) s/d ~26666 (20mA)
+          int16_t physADC = ads.readADC(i - 1);
 
-          // Filter
-          if (analogInput[i].filter)
-            analogInput[i].adcValue = filterSensor(valueADC, analogInput[i].adcValue, analogInput[i].filterPeriod);
-          else
-            analogInput[i].adcValue = valueADC;
+          // 2. HITUNG ARUS REAL (Hukum Ohm)
+          // Gain 2/3 = 0.1875mV per bit. Resistor = 250 Ohm.
+          float voltage = physADC * 0.0001875;
+          float currentMA = voltage / 0.250;
 
-          // Konversi Voltage
-          float voltage = analogInput[i].adcValue * 0.0001875;
-          float currentMA = 0;
-
+          // 3. HITUNG RAW SESUAI REQUEST (13107 - 65536)
+          float customRaw = 0;
           if (analogInput[i].inputType == "4-20 mA")
           {
-            currentMA = voltage / 0.25;
-            if (currentMA < 1.0)
-              currentMA = 0.0;
+            // Jika arus < 4mA, mapping proporsional dari 0
+            if (currentMA < 4.0)
+            {
+              customRaw = mapFloat(currentMA, 0.0, 4.0, 0, 13107);
+            }
+            else
+            {
+              // Mapping 4mA -> 13107 dan 20mA -> 65536
+              customRaw = mapFloat(currentMA, 4.0, 20.0, 13107.0, 65536.0);
+            }
+          }
+          else if (analogInput[i].inputType == "0-20 mA")
+          {
+            // Mapping 0-20mA Full Range 0-65536
+            customRaw = mapFloat(currentMA, 0.0, 20.0, 0.0, 65536.0);
+          }
+          else
+          {
+            // Default (Voltage dll): Tampilkan Raw Asli saja
+            customRaw = physADC;
+          }
+
+          // [SIMPAN]: Masukkan nilai custom ini ke variabel struct agar Tampil di Serial/Web
+          analogInput[i].adcValue = (int32_t)customRaw;
+
+          // 4. HITUNG ENGINEERING VALUE (Suhu/Tekanan)
+          // Tetap gunakan 'currentMA' yang asli agar perhitungan suhu akurat
+          if (analogInput[i].inputType == "4-20 mA")
+          {
+            if (currentMA < 3.0)
+              currentMA = 0.0; // Cut off kabel putus
+
             if (analogInput[i].scaling)
               analogInput[i].mapValue = calculate_Measurement(currentMA, analogInput[i].lowLimit, analogInput[i].highLimit);
             else
               analogInput[i].mapValue = currentMA;
           }
-          else if (analogInput[i].inputType == "0-20 mA")
-          {
-            currentMA = voltage / 0.25;
-            if (currentMA < 0)
-              currentMA = 0;
-            if (analogInput[i].scaling)
-              analogInput[i].mapValue = mapFloat(currentMA, 0.0, 20.0, analogInput[i].lowLimit, analogInput[i].highLimit);
-            else
-              analogInput[i].mapValue = currentMA;
-          }
+          // ... (lanjutkan logika 0-10V dll seperti kode lama) ...
           else if (analogInput[i].inputType == "0-10 V")
           {
             if (voltage < 0)
@@ -2456,26 +2476,23 @@ void Task_DataAcquisition(void *parameter)
             else
               analogInput[i].mapValue = voltage;
           }
-          else
-          {
-            analogInput[i].mapValue = voltage;
-          }
 
+          // Calibration (Offset)
           if (analogInput[i].calibration)
           {
             analogInput[i].mapValue = (analogInput[i].mapValue * analogInput[i].mValue) + analogInput[i].cValue;
           }
-
           if (useTCP)
           {
-            mbIP.Ireg(i + 9, analogInput[i].adcValue);
-            mbIP.Ireg(i - 1, analogInput[i].mapValue * 100);
+            mbIP.Ireg(i + 9, (uint16_t)analogInput[i].adcValue);
+            mbIP.Ireg(i - 1, (uint16_t)(analogInput[i].mapValue * 100));
           }
           if (useRTU)
           {
-            mbRTU.Ireg(i + 9, analogInput[i].adcValue);
-            mbRTU.Ireg(i - 1, analogInput[i].mapValue * 100);
+            mbRTU.Ireg(i + 9, (uint16_t)analogInput[i].adcValue);
+            mbRTU.Ireg(i - 1, (uint16_t)(analogInput[i].mapValue * 100));
           }
+
           sensorData.analogValues[i] = analogInput[i].mapValue;
         }
         xSemaphoreGive(i2cMutex);
@@ -2491,15 +2508,18 @@ void Task_DataAcquisition(void *parameter)
       for (byte i = 1; i < jumlahInputDigital + 1; i++)
       {
         int currentRawReading = digitalRead(digitalInput[i].pin);
-        if (currentRawReading != lastRawState[i]) {
+        if (currentRawReading != lastRawState[i])
+        {
           lastDebounceTime[i] = millis(); // Reset timer
         }
         lastRawState[i] = currentRawReading; // Simpan status raw terakhir
 
-        int cleanInput = stableState[i]; 
+        int cleanInput = stableState[i];
 
-        if ((millis() - lastDebounceTime[i]) > debounceDelay) {
-          if (currentRawReading != stableState[i]) {
+        if ((millis() - lastDebounceTime[i]) > debounceDelay)
+        {
+          if (currentRawReading != stableState[i])
+          {
             stableState[i] = currentRawReading;
             cleanInput = stableState[i];
           }
@@ -2508,22 +2528,25 @@ void Task_DataAcquisition(void *parameter)
         static int prevStableState[jumlahInputDigital + 1] = {0};
         bool isRisingEdge = (cleanInput == 1 && prevStableState[i] == 0);
         bool isFallingEdge = (cleanInput == 0 && prevStableState[i] == 1);
-      
-        prevStableState[i] = cleanInput; 
+
+        prevStableState[i] = cleanInput;
 
         // -----------------------------------------------------------
         // 2. LOGIKA MODE (TASK MODE)
         // -----------------------------------------------------------
-        
+
         // Cek Trigger untuk Data Logger
         int pinTrig = 0;
-        if (networkSettings.sendTrig.length() >= 3) pinTrig = (networkSettings.sendTrig.substring(2, 3)).toInt();
-        if (i == pinTrig && isRisingEdge) flagSend = true; // Trigger saat Rising Edge bersih
+        if (networkSettings.sendTrig.length() >= 3)
+          pinTrig = (networkSettings.sendTrig.substring(2, 3)).toInt();
+        if (i == pinTrig && isRisingEdge)
+          flagSend = true; // Trigger saat Rising Edge bersih
 
         if (digitalInput[i].taskMode == "Cycle Time")
         {
           // Cycle Time butuh presisi tinggi, tetap pakai Interrupt (flagInt)
-          if (digitalInput[i].flagInt) {
+          if (digitalInput[i].flagInt)
+          {
             digitalInput[i].value = (digitalInput[i].millisNow - digitalInput[i].millis_1) / 1000.0;
             digitalInput[i].millis_1 = digitalInput[i].millisNow;
             digitalInput[i].flagInt = 0;
@@ -2532,28 +2555,32 @@ void Task_DataAcquisition(void *parameter)
         else if (digitalInput[i].taskMode == "Counting")
         {
           // Logic Polling Rising Edge (Anti Double Count)
-          if (isRisingEdge) { 
+          if (isRisingEdge)
+          {
             digitalInput[i].value++;
           }
         }
         else if (digitalInput[i].taskMode == "Run Time")
         {
           // Logika Run Time (tetap sama)
-          if (millis() - lastRunTimeCheck >= 60000) {
-            if (cleanInput == digitalInput[i].inputState) {
-               digitalInput[i].value++;
-               updateJson("/runtimeData.json", String(i).c_str(), digitalInput[i].value);
+          if (millis() - lastRunTimeCheck >= 60000)
+          {
+            if (cleanInput == digitalInput[i].inputState)
+            {
+              digitalInput[i].value++;
+              updateJson("/runtimeData.json", String(i).c_str(), digitalInput[i].value);
             }
           }
         }
         else if (digitalInput[i].taskMode == "Pulse Mode")
         {
-           // Pulse mode tetap pakai Interrupt
-           if (millis() - digitalInput[i].lastMillisPulseMode > digitalInput[i].intervalTime) {
+          // Pulse mode tetap pakai Interrupt
+          if (millis() - digitalInput[i].lastMillisPulseMode > digitalInput[i].intervalTime)
+          {
             digitalInput[i].value = (float)digitalInput[i].sumValue * digitalInput[i].conversionFactor;
             digitalInput[i].sumValue = 0;
             digitalInput[i].lastMillisPulseMode = millis();
-           }
+          }
         }
         else
         {
@@ -2599,23 +2626,27 @@ void Task_DataAcquisition(void *parameter)
     // ========================================================================
     if (millis() - lastDebugPrint >= 2000)
     {
-      Serial.println("\n=== ANALOG INPUT MONITOR ===");
-      Serial.println("ID | Name            | Value    | Raw   | Type");
+      if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(100)))
+        Serial.println("\n=== ANALOG INPUT MONITOR ===");
+      Serial.println("ID   | Name                 | Value    | Raw    | Type");
       for (int i = 1; i <= jumlahInputAnalog; i++)
       {
-        Serial.printf("A%-2d| %-15s | %8.2f | %5.0f | %s\n", i,
-                      analogInput[i].name.c_str(),
+        // Format: A(ID) | Name(20 chars) | Value(8 chars) | Raw(6 chars) | Type
+        Serial.printf(" A%-2d | %-20s | %8.2f | %6d | %-12s\n",
+                      i,
+                      analogInput[i].name.length() > 0 ? analogInput[i].name.c_str() : "-",
                       analogInput[i].mapValue,
-                      analogInput[i].adcValue,
+                      (int)analogInput[i].adcValue, // Cast ke int biar rapi
                       analogInput[i].inputType.c_str());
       }
+      Serial.println("");
 
       Serial.println("\n=== DIGITAL INPUT MONITOR ===");
-      Serial.println("ID | Name            | Value    | Mode         | Status");
-
+      Serial.println("ID   | Name                 | Value    | Mode         | Status");
       for (int i = 1; i <= jumlahInputDigital; i++)
       {
         String statusStr;
+        // Formatting status string
         if (digitalInput[i].taskMode == "Counting")
           statusStr = String((int)digitalInput[i].value) + " cnt";
         else if (digitalInput[i].taskMode == "Run Time")
@@ -2626,12 +2657,13 @@ void Task_DataAcquisition(void *parameter)
           statusStr = String(digitalInput[i].value, 2);
         else
           statusStr = (digitalInput[i].value > 0.5) ? "HIGH" : "LOW";
-
-        Serial.printf("D%-2d| %-15s | %-8.2f | %-12s | %s\n", i,
-                      digitalInput[i].name.c_str(),
+        Serial.printf(" D%-2d | %-20s | %8.2f | %-12s | %-8s\n",
+                      i,
+                      digitalInput[i].name.length() > 0 ? digitalInput[i].name.c_str() : "-",
                       digitalInput[i].value,
                       (digitalInput[i].taskMode.length() > 0 ? digitalInput[i].taskMode.c_str() : "Normal"),
                       statusStr.c_str());
+        xSemaphoreGive(serialMutex);
       }
       lastDebugPrint = millis();
     }
@@ -2715,19 +2747,22 @@ void Task_ModbusClient(void *parameter)
   ESP_LOGI("Core1", "Modbus Client Task started");
   unsigned long lastModbusRead = 0;
   unsigned long lastWatchdogFeed = 0;
+  unsigned long lastDebugPrintModbus = 0; // Timer khusus Serial Monitor
+
   while (true)
   {
-    // Cek Timer sesuai Scan Rate (Misal tiap 1 detik)
     if (millis() - lastWatchdogFeed >= 5000)
     {
-      esp_task_wdt_reset(); // Reset watchdog manual
+      esp_task_wdt_reset();
       lastWatchdogFeed = millis();
     }
+
+    // Loop sesuai Scan Rate (misal 1 detik)
     if (millis() - lastModbusRead >= (modbusParam.scanRate * 1000))
     {
       int totalParamsToRead = 0;
 
-      // 1. Ambil Jumlah Sensor
+      // 1. Ambil Config
       if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(200)))
       {
         deserializeJson(jsonParam, stringParam);
@@ -2736,13 +2771,19 @@ void Task_ModbusClient(void *parameter)
         xSemaphoreGive(jsonMutex);
       }
 
-      // PRINT HEADER (Agar mirip Digital Input Status)
-      if (totalParamsToRead > 0)
+      bool showDebug = (millis() - lastDebugPrintModbus >= 2000);
+
+      if (showDebug && totalParamsToRead > 0)
       {
-        Serial.println("\n=== MODBUS DATA MONITOR ===");
+        if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(200)))
+        {
+          Serial.println("\n=== MODBUS DATA MONITOR ===");
+          Serial.println("ID   | Name                 | Value    | Raw    | Config Info");
+          xSemaphoreGive(serialMutex);
+        }
       }
 
-      // 2. LOOPING SEMUA PARAMETER
+      // 3. Loop Sensor
       for (int i = 0; i < totalParamsToRead; i++)
       {
         String currentParamName = "";
@@ -2750,51 +2791,46 @@ void Task_ModbusClient(void *parameter)
         float multiplier = 1.0;
         bool validParam = false;
 
-        // A. Ambil Konfigurasi Sensor ke-i
         if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(50)))
         {
           JsonArray nameData = jsonParam["nameData"];
           currentParamName = nameData[i].as<String>();
-
           JsonArray paramArray = jsonParam[currentParamName];
-          addr = paramArray[0];       // Slave ID
-          fc = paramArray[1];         // Function Code
-          reg = paramArray[2];        // Register
-          multiplier = paramArray[3]; // Scaling
-
+          addr = paramArray[0];
+          fc = paramArray[1];
+          reg = paramArray[2];
+          multiplier = paramArray[3];
           validParam = true;
           xSemaphoreGive(jsonMutex);
         }
 
-        // B. Baca Sensor
         if (validParam)
         {
-          // Panggil fungsi readModbus (pastikan fungsi ini sudah dibersihkan Serial.print-nya)
           unsigned int rawValue = readModbusNonBlocking(addr, fc, reg, 100);
           float finalValue = rawValue * multiplier;
 
-          Serial.printf("MB-%d [%-15s]: %-8.2f | RAW: %-5u | ID: %d | Reg: %d\n",
-                        i + 1,                    // Nomor Urut
-                        currentParamName.c_str(), // Nama Parameter (dari JSON)
-                        finalValue,               // Nilai setelah dikali scaling
-                        rawValue,                 // Nilai Asli dari Modbus
-                        addr,                     // Slave ID
-                        reg                       // Register Address
-          );
-
-          // D. Simpan ke JSON Send (Untuk Web/MQTT)
+          if (showDebug)
+          {
+            // Format disamakan dengan tabel di atas
+            Serial.printf("M%-3d | %-20s | %8.2f | %6u | ID:%d FC:%d Reg:%d\n",
+                          i + 1,
+                          currentParamName.c_str(),
+                          finalValue,
+                          rawValue,
+                          addr, fc, reg);
+          }
           if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(50)))
           {
             jsonSend[currentParamName] = String(finalValue, 2);
             xSemaphoreGive(jsonMutex);
           }
         }
-        // Beri jeda sedikit antar sensor agar RS485 stabil
         vTaskDelay(pdMS_TO_TICKS(10));
       }
 
-      if (totalParamsToRead > 0)
+      if (showDebug)
       {
+        lastDebugPrintModbus = millis();
       }
 
       lastModbusRead = millis();
@@ -2814,9 +2850,7 @@ void Task_DataLogger(void *parameter)
   unsigned long lastSendTime = 0;
   unsigned long lastSDSave = 0;
   unsigned long lastPrint = 0;
-  unsigned long lastWatchdogFeed = 0; // ✅ TAMBAH
-
-  // ✅ ALOKASI DI LUAR LOOP (Sekali saja!)
+  unsigned long lastWatchdogFeed = 0;
   DynamicJsonDocument docNew(1024);
   DynamicJsonDocument docSD(1024);
 
@@ -3010,13 +3044,14 @@ void setup()
   sdMutex = xSemaphoreCreateMutex();
   jsonMutex = xSemaphoreCreateMutex();
   modbusMutex = xSemaphoreCreateMutex();
+  serialMutex = xSemaphoreCreateMutex();
   queueSensorData = xQueueCreate(10, sizeof(SensorDataPacket));
   queueModbusData = xQueueCreate(10, sizeof(ModbusDataPacket));
   queueLogData = xQueueCreate(10, sizeof(LogDataPacket));
 
-  if (!spiMutex || !jsonMutex || !queueSensorData || !modbusMutex)
+  if (!spiMutex || !jsonMutex || !queueSensorData || !modbusMutex || !serialMutex)
   {
-    Serial.println("❌ Critical Error: Failed to create Mutex/Queue!");
+    Serial.println("❌ Critical Error: Failed to create Mutex!");
     while (1)
       delay(1000);
   }
