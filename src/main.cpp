@@ -2389,18 +2389,14 @@ void Task_DataAcquisition(void *parameter)
   unsigned long lastReadAnalog = 0;
   unsigned long lastReadDigital = 0;
   unsigned long lastDebugPrint = 0;
-
-  // [DIKEMBALIKAN & DIPAKAI] Timer untuk cek Run Time setiap 60 detik
   unsigned long lastRunTimeCheck = 0;
-
   int16_t valueADC;
 
-  // --- VARIABEL DEBOUNCING (Static agar nilai tersimpan antar loop) ---
+  // Variabel Debouncing Digital
   static int lastRawState[jumlahInputDigital + 1] = {0};
   static unsigned long lastDebounceTime[jumlahInputDigital + 1] = {0};
   static int stableState[jumlahInputDigital + 1] = {0};
-  const unsigned long debounceDelay = 50; // Filter noise 50ms
-
+  const unsigned long debounceDelay = 50;
   while (true)
   {
     bool useTCP = (networkSettings.protocolMode2.indexOf("TCP") >= 0);
@@ -2415,42 +2411,49 @@ void Task_DataAcquisition(void *parameter)
       {
         for (byte i = 1; i < jumlahInputAnalog + 1; i++)
         {
+          // 1. Read Hardware Voltage
           valueADC = ads.readADC(i - 1);
-          float voltage = valueADC * 0.0001875; // Gain 0
-          float currentMA = voltage / 0.250;
-          float customRaw = 0;
+          float voltage = valueADC * 0.0001875; // Gain 0 (+/- 6.144V range)
+          
+          // 2. HITUNG ARUS (UPDATED)
+          // Data Lapangan: Saat 20mA, voltage drop hanya ~0.38V.
+          // Maka Resistor Shunt aktual = 0.38V / 0.02A = 19 Ohm.
+          // Kita ubah pembagi dari 0.250 menjadi 0.01905
+          
+          float shuntResistor = 0.01905; // <--- NILAI BARU (Sesuai Data Raw 5000)
+          float currentMA = voltage / shuntResistor; 
+          
+          // 3. TUNING FINE-ADJUSTMENT
+          // Jika di serial monitor terbaca 19.8mA atau 20.2mA saat max,
+          // ubah nilai ini sedikit untuk pas 20.0
+          float tuningMaxmA = 20.0; 
+
+          // 4. MAPPING RAW (Standard 20mA Scale)
+          // 0 mA  -> 0
+          // 20 mA -> 65535
+          float customRaw = mapFloat(currentMA, 0.0, tuningMaxmA, 0.0, 65535.0);
+
+          // -----------------------------------------------------------------
+          // SENSOR LOGIC
+          // -----------------------------------------------------------------
+
           if (analogInput[i].inputType == "4-20 mA")
           {
-            // Range 4-20mA:
-            // 4 mA  = ~13107
-            // 20 mA = 65535
-            // < 4 mA = Fault (Raw turun dibawah 13107)
-
-            // Kita mapping currentMA dari basis 0-20 ke 0-65535
-            customRaw = mapFloat(currentMA, 0.0, 20.0, 0.0, 65535.0);
-
-            if (currentMA < 3.5)
-            {
-              analogInput[i].mapValue = analogInput[i].lowLimit;
-            }
-            else
-            {
-              if (analogInput[i].scaling)
-                analogInput[i].mapValue = calculate_Measurement(currentMA, analogInput[i].lowLimit, analogInput[i].highLimit);
-              else
-                analogInput[i].mapValue = currentMA;
+            // Deteksi Putus Kabel (< 3.0 mA)
+            if (currentMA < 3.0) {
+               customRaw = 0; 
+               analogInput[i].mapValue = analogInput[i].lowLimit; 
+            } 
+            else {
+               if (analogInput[i].scaling)
+                 analogInput[i].mapValue = calculate_Measurement(currentMA, analogInput[i].lowLimit, analogInput[i].highLimit);
+               else
+                 analogInput[i].mapValue = currentMA;
             }
           }
           else if (analogInput[i].inputType == "0-20 mA")
           {
-            // Range 0-20mA:
-            // 0 mA  = 0
-            // 20 mA = 65535
-
-            if (currentMA < 0)
-              currentMA = 0;
-            customRaw = mapFloat(currentMA, 0.0, 20.0, 0.0, 65535.0);
-
+            if (currentMA < 0) currentMA = 0;
             if (analogInput[i].scaling)
               analogInput[i].mapValue = mapFloat(currentMA, 0.0, 20.0, analogInput[i].lowLimit, analogInput[i].highLimit);
             else
@@ -2458,34 +2461,29 @@ void Task_DataAcquisition(void *parameter)
           }
           else if (analogInput[i].inputType == "0-10 V")
           {
-            // 0-10V Logic
-            if (voltage < 0)
-              voltage = 0;
-            customRaw = mapFloat(voltage, 0.0, 10.0, 0.0, 65535.0);
-
-            if (analogInput[i].scaling)
-              analogInput[i].mapValue = mapFloat(voltage, 0.0, 10.0, analogInput[i].lowLimit, analogInput[i].highLimit);
-            else
-              analogInput[i].mapValue = voltage;
-          }
-          else
-          {
-            customRaw = valueADC;
-            analogInput[i].mapValue = voltage;
+             if (voltage < 0) voltage = 0;
+             float tuningMaxVolt = 10.0; 
+             customRaw = mapFloat(voltage, 0.0, tuningMaxVolt, 0.0, 65535.0);
+             
+             if (analogInput[i].scaling)
+               analogInput[i].mapValue = mapFloat(voltage, 0.0, 10.0, analogInput[i].lowLimit, analogInput[i].highLimit);
+             else
+               analogInput[i].mapValue = voltage;
           }
 
-          if (customRaw > 65535.0)
-            customRaw = 65535.0;
-          if (customRaw < 0.0)
-            customRaw = 0.0;
+          // 5. SATURATION CLAMPING
+          if (customRaw > 65535.0) customRaw = 65535.0;
+          if (customRaw < 0.0) customRaw = 0.0;
 
+          // 6. Store Data
           analogInput[i].adcValue = customRaw;
-
+          
           if (analogInput[i].calibration)
           {
             analogInput[i].mapValue = (analogInput[i].mapValue * analogInput[i].mValue) + analogInput[i].cValue;
           }
 
+          // Update Modbus
           if (useTCP)
           {
             mbIP.Ireg(i + 9, (uint16_t)analogInput[i].adcValue);
@@ -2534,20 +2532,15 @@ void Task_DataAcquisition(void *parameter)
 
         prevStableState[i] = cleanInput;
 
-        // -----------------------------------------------------------
-        // 2. LOGIKA MODE (TASK MODE)
-        // -----------------------------------------------------------
-
         // Cek Trigger untuk Data Logger
         int pinTrig = 0;
         if (networkSettings.sendTrig.length() >= 3)
           pinTrig = (networkSettings.sendTrig.substring(2, 3)).toInt();
         if (i == pinTrig && isRisingEdge)
-          flagSend = true; // Trigger saat Rising Edge bersih
+          flagSend = true;
 
         if (digitalInput[i].taskMode == "Cycle Time")
         {
-          // Cycle Time butuh presisi tinggi, tetap pakai Interrupt (flagInt)
           if (digitalInput[i].flagInt)
           {
             digitalInput[i].value = (digitalInput[i].millisNow - digitalInput[i].millis_1) / 1000.0;
@@ -2557,7 +2550,6 @@ void Task_DataAcquisition(void *parameter)
         }
         else if (digitalInput[i].taskMode == "Counting")
         {
-          // Logic Polling Rising Edge (Anti Double Count)
           if (isRisingEdge)
           {
             digitalInput[i].value++;
@@ -2565,7 +2557,6 @@ void Task_DataAcquisition(void *parameter)
         }
         else if (digitalInput[i].taskMode == "Run Time")
         {
-          // Logika Run Time (tetap sama)
           if (millis() - lastRunTimeCheck >= 60000)
           {
             if (cleanInput == digitalInput[i].inputState)
@@ -2577,7 +2568,6 @@ void Task_DataAcquisition(void *parameter)
         }
         else if (digitalInput[i].taskMode == "Pulse Mode")
         {
-          // Pulse mode tetap pakai Interrupt
           if (millis() - digitalInput[i].lastMillisPulseMode > digitalInput[i].intervalTime)
           {
             digitalInput[i].value = (float)digitalInput[i].sumValue * digitalInput[i].conversionFactor;
@@ -2587,14 +2577,12 @@ void Task_DataAcquisition(void *parameter)
         }
         else
         {
-          // Normal Mode: Gunakan hasil Debounce (stableState)
           int cleanInput = stableState[i];
           digitalInput[i].value = digitalInput[i].inv ? !cleanInput : cleanInput;
         }
 
         sensorData.digitalValues[i] = digitalInput[i].value;
 
-        // JSON Live Update
         if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(10)))
         {
           if (digitalInput[i].name != "")
@@ -2605,14 +2593,12 @@ void Task_DataAcquisition(void *parameter)
           xSemaphoreGive(jsonMutex);
         }
 
-        // Modbus Write
         if (useTCP)
           mbIP.Ireg(i + 19, digitalInput[i].value);
         if (useRTU)
           mbRTU.Ireg(i + 19, digitalInput[i].value);
       }
 
-      // [UPDATE] Reset timer Run Time setelah loop sensor selesai (hanya sekali per menit)
       if (millis() - lastRunTimeCheck >= 60000)
       {
         lastRunTimeCheck = millis();
