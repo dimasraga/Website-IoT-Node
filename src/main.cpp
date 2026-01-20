@@ -1973,7 +1973,7 @@ void handleEthernetClient()
           }
 
           String realtimeJson;
-          serializeJson(arr, realtimeJson);
+          serializeJson(jsonSend, realtimeJson);
           xSemaphoreGive(jsonMutex);
           client.print(realtimeJson);
         }
@@ -2200,21 +2200,52 @@ void handleEthernetClient()
         filePath = "/UpdateOTA.html";
       else if (basePath == "/debug")
         filePath = "/debug-monitor.html";
+      String contentType = getContentType(filePath);
 
+      // 2. DETEKSI FILE (GZIP vs NORMAL)
+      bool fileFound = false;
+      bool isGzip = false;
+
+      // Cek file normal dulu
       if (SPIFFS.exists(filePath))
       {
+        fileFound = true;
+      }
+      // Cek file terkompresi (.gz)
+      else if (SPIFFS.exists(filePath + ".gz"))
+      {
+        filePath += ".gz"; // Ubah path menunjuk ke file .gz
+        fileFound = true;
+        isGzip = true;
+      }
+
+      if (fileFound)
+      {
         File file = SPIFFS.open(filePath, "r");
-        String contentType = getContentType(filePath);
 
         client.println("HTTP/1.1 200 OK");
+
+        // Kirim Content-Type yang benar (misal: text/css)
+        // Walaupun filenya .gz, browser perlu tahu ini aslinya CSS
         client.println("Content-Type: " + contentType);
-        if (filePath.endsWith(".css") || filePath.endsWith(".js") || filePath.endsWith(".png"))
+
+        // Header Gzip (Wajib ada jika file diambil dari .gz)
+        if (isGzip)
+        {
+          client.println("Content-Encoding: gzip");
+        }
+
+        // Cache Control (Penting agar load cepat saat refresh biasa)
+        // Kita cek ekstensi asli atau ekstensi .gz
+        if (contentType.indexOf("css") >= 0 || contentType.indexOf("javascript") >= 0 || contentType.indexOf("image") >= 0)
         {
           client.println("Cache-Control: public, max-age=31536000");
         }
+
         client.println("Connection: close");
         client.println();
 
+        // BUFFERED SENDING
         uint8_t buffer[512];
         while (file.available())
         {
@@ -2268,7 +2299,7 @@ void Task_NetworkManagement(void *parameter)
     // ============================================================
     if (networkSettings.networkMode == "Ethernet")
     {
-      if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+      if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(200)) == pdTRUE)
       {
         EthernetClient client = ethServer.available();
         if (client)
@@ -2414,70 +2445,79 @@ void Task_DataAcquisition(void *parameter)
           // 1. Read Hardware Voltage
           valueADC = ads.readADC(i - 1);
           float voltage = valueADC * 0.0001875; // Gain 0 (+/- 6.144V range)
-          
-          // 2. HITUNG ARUS (UPDATED)
-          // Data Lapangan: Saat 20mA, voltage drop hanya ~0.38V.
-          // Maka Resistor Shunt aktual = 0.38V / 0.02A = 19 Ohm.
-          // Kita ubah pembagi dari 0.250 menjadi 0.01905
-          
-          float shuntResistor = 0.01905; // <--- NILAI BARU (Sesuai Data Raw 5000)
-          float currentMA = voltage / shuntResistor; 
-          
-          // 3. TUNING FINE-ADJUSTMENT
-          // Jika di serial monitor terbaca 19.8mA atau 20.2mA saat max,
-          // ubah nilai ini sedikit untuk pas 20.0
-          float tuningMaxmA = 20.0; 
+          float shuntResistor = 250.0;
+          float currentMA = (voltage / shuntResistor) * 1000.0;
 
-          // 4. MAPPING RAW (Standard 20mA Scale)
-          // 0 mA  -> 0
-          // 20 mA -> 65535
-          float customRaw = mapFloat(currentMA, 0.0, tuningMaxmA, 0.0, 65535.0);
+          float customRaw = 0.0; // Nilai ADC/Raw simulasi (0-65535)
+          float rawResult = 0.0; // Nilai hasil konversi (Engineering Value) sementara
+
+          // 3. TUNING FINE-ADJUSTMENT & MAPPING RAW
+          float tuningMaxmA = 20.0;
+          customRaw = mapFloat(currentMA, 0.0, tuningMaxmA, 0.0, 65535.0);
 
           // -----------------------------------------------------------------
-          // SENSOR LOGIC
+          // LOGIKA SENSOR (Calculate rawResult dulu, jangan langsung ke mapValue)
           // -----------------------------------------------------------------
-
           if (analogInput[i].inputType == "4-20 mA")
           {
             // Deteksi Putus Kabel (< 3.0 mA)
-            if (currentMA < 3.0) {
-               customRaw = 0; 
-               analogInput[i].mapValue = analogInput[i].lowLimit; 
-            } 
-            else {
-               if (analogInput[i].scaling)
-                 analogInput[i].mapValue = calculate_Measurement(currentMA, analogInput[i].lowLimit, analogInput[i].highLimit);
-               else
-                 analogInput[i].mapValue = currentMA;
+            if (currentMA < 3.0)
+            {
+              customRaw = 0;
+              rawResult = analogInput[i].lowLimit; // Pakai batas bawah jika putus
+            }
+            else
+            {
+              if (analogInput[i].scaling)
+                rawResult = calculate_Measurement(currentMA, analogInput[i].lowLimit, analogInput[i].highLimit);
+              else
+                rawResult = currentMA;
             }
           }
           else if (analogInput[i].inputType == "0-20 mA")
           {
-            if (currentMA < 0) currentMA = 0;
+            if (currentMA < 0)
+              currentMA = 0;
             if (analogInput[i].scaling)
-              analogInput[i].mapValue = mapFloat(currentMA, 0.0, 20.0, analogInput[i].lowLimit, analogInput[i].highLimit);
+              rawResult = mapFloat(currentMA, 0.0, 20.0, analogInput[i].lowLimit, analogInput[i].highLimit);
             else
-              analogInput[i].mapValue = currentMA;
+              rawResult = currentMA;
           }
           else if (analogInput[i].inputType == "0-10 V")
           {
-             if (voltage < 0) voltage = 0;
-             float tuningMaxVolt = 10.0; 
-             customRaw = mapFloat(voltage, 0.0, tuningMaxVolt, 0.0, 65535.0);
-             
-             if (analogInput[i].scaling)
-               analogInput[i].mapValue = mapFloat(voltage, 0.0, 10.0, analogInput[i].lowLimit, analogInput[i].highLimit);
-             else
-               analogInput[i].mapValue = voltage;
-          }
+            if (voltage < 0)
+              voltage = 0;
+            float tuningMaxVolt = 10.0;
+            customRaw = mapFloat(voltage, 0.0, tuningMaxVolt, 0.0, 65535.0);
 
+            if (analogInput[i].scaling)
+              rawResult = mapFloat(voltage, 0.0, 10.0, analogInput[i].lowLimit, analogInput[i].highLimit);
+            else
+              rawResult = voltage;
+          }
+          if (analogInput[i].filter)
+          {
+            // Ambil koefisien filter dari settingan (filterPeriod)
+            // Semakin KECIL nilai fc (misal 0.1), semakin STABIL (tapi lambat naik turunnya)
+            float fc = (analogInput[i].filterPeriod > 0.01) ? analogInput[i].filterPeriod : 1.0;
+
+            // Lakukan filtering: Nilai Baru = (alpha * Input) + ((1-alpha) * Nilai Lama)
+            analogInput[i].mapValue = filterSensor(rawResult, analogInput[i].mapValue, fc);
+          }
+          else
+          {
+            // Jika filter tidak dicentang, langsung pakai nilai mentah (Goyang/Responsif)
+            analogInput[i].mapValue = rawResult;
+          }
           // 5. SATURATION CLAMPING
-          if (customRaw > 65535.0) customRaw = 65535.0;
-          if (customRaw < 0.0) customRaw = 0.0;
+          if (customRaw > 65535.0)
+            customRaw = 65535.0;
+          if (customRaw < 0.0)
+            customRaw = 0.0;
 
           // 6. Store Data
           analogInput[i].adcValue = customRaw;
-          
+
           if (analogInput[i].calibration)
           {
             analogInput[i].mapValue = (analogInput[i].mapValue * analogInput[i].mValue) + analogInput[i].cValue;
@@ -2799,7 +2839,7 @@ void Task_ModbusClient(void *parameter)
           );
 
           // D. Simpan ke JSON Send (Untuk Web/MQTT)
-          if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(50)))
+          if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(200)))
           {
             jsonSend[currentParamName] = String(finalValue, 2);
             xSemaphoreGive(jsonMutex);
@@ -3926,20 +3966,23 @@ unsigned int readModbusNonBlocking(unsigned int modbusAddress, unsigned int funC
   unsigned int buffSend[8];
   unsigned int crcValue;
   unsigned int returnValue = 0;
-  byte buffModbus[64];
+  byte buffModbus[128]; // Buffer diperbesar
   int resIndex = 0;
 
-  // 1. Bersihkan Buffer
+  // 1. Bersihkan Buffer Serial sebelum kirim (Flush RX)
   while (SerialModbus.available())
+  {
     SerialModbus.read();
+    vTaskDelay(1);
+  }
 
-  // 2. Siapkan Request
+  // 2. Siapkan Request Frame
   buffSend[0] = modbusAddress;
   buffSend[1] = funCode;
   buffSend[2] = parseByte(regAddress, 1);
   buffSend[3] = parseByte(regAddress, 0);
   buffSend[4] = 0;
-  buffSend[5] = 1;
+  buffSend[5] = 1; // Minta 1 Register
   crcValue = crcModbus(buffSend, 0, 6);
   buffSend[6] = parseByte(crcValue, 1);
   buffSend[7] = parseByte(crcValue, 0);
@@ -3949,38 +3992,57 @@ unsigned int readModbusNonBlocking(unsigned int modbusAddress, unsigned int funC
   {
     SerialModbus.write(buffSend[j]);
   }
-  SerialModbus.flush();
+  SerialModbus.flush(); // Tunggu sampai data benar-benar terkirim
 
-  // 4. ✅ TUNGGU DENGAN YIELD (Non-Blocking!)
+  // 4. Tunggu Respon (Smart Wait)
   unsigned long startTime = millis();
-  while (millis() - startTime < timeoutMs)
+  bool dataDetected = false;
+
+  // Tunggu byte pertama datang
+  while ((millis() - startTime) < timeoutMs)
   {
     if (SerialModbus.available())
+    {
+      dataDetected = true;
       break;
-    vTaskDelay(1); // ✅ WAJIB! Beri CPU ke task lain
+    }
+    vTaskDelay(1); // Yield agar task lain tidak macet
   }
 
-  if (!SerialModbus.available())
+  if (!dataDetected)
   {
-    return 0; // Timeout
+    return 0; // Timeout: Tidak ada balasan sama sekali
   }
 
-  // 5. ✅ Baca dengan Yield
-  vTaskDelay(pdMS_TO_TICKS(10)); // Jeda sebentar biar byte lengkap
-
-  while (SerialModbus.available() && resIndex < 60)
-  {
-    buffModbus[resIndex] = SerialModbus.read();
-    resIndex++;
+  // 5. Baca Data (Looping sampai data habis / silent)
+  // Logic: Baca terus selama masih ada data, atau sampai "diam" selama >10ms (tanda paket selesai)
+  unsigned long lastByteTime = millis();
+  while ((millis() - lastByteTime) < 20)
+  { // Tunggu silence gap 20ms
+    if (SerialModbus.available())
+    {
+      buffModbus[resIndex] = SerialModbus.read();
+      resIndex++;
+      if (resIndex >= 120)
+        break;                 // Safety buffer overflow
+      lastByteTime = millis(); // Reset timer setiap ada data masuk
+    }
+    else
+    {
+      vTaskDelay(1); // Yield sedikit saat menunggu byte berikutnya
+    }
   }
 
-  // 6. Parse Data
+  // 6. Validasi & Parsing Data
+  // Minimal respon valid: ID + FC + ByteCount + DataH + DataL + CRC_L + CRC_H = 7 bytes
   if (resIndex >= 5)
   {
+    // Cek alamat dan function code (validasi dasar)
     if (buffModbus[0] == modbusAddress && buffModbus[1] == funCode)
     {
       if (funCode == 3 || funCode == 4)
       {
+        // Gabungkan Byte High & Low
         returnValue = (buffModbus[3] << 8) | buffModbus[4];
       }
     }
@@ -3988,6 +4050,7 @@ unsigned int readModbusNonBlocking(unsigned int modbusAddress, unsigned int funC
 
   return returnValue;
 }
+
 // unsigned int readModbus(unsigned int modbusAddress, unsigned int funCode, unsigned int regAddress)
 // {
 //   unsigned int buffSend[8], crcValue, returnValue;

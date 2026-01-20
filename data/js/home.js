@@ -19,6 +19,14 @@ document.addEventListener("DOMContentLoaded", () => {
     protocolMode, endpoint, connStatus, sendInterval]
     .forEach(el => { if (el) el.disabled = true; });
 
+  // [UPDATED] Analog Input Elements Reference (Hanya Scaled Value)
+  const aiScaledInputs = [
+    document.getElementById('ai1Scaled'),
+    document.getElementById('ai2Scaled'),
+    document.getElementById('ai3Scaled'),
+    document.getElementById('ai4Scaled')
+  ];
+
   // Digital I/O Elements
   const diValues = [
     document.getElementById('di1Value'),
@@ -40,8 +48,6 @@ document.addEventListener("DOMContentLoaded", () => {
   ];
 
   // --- 2. FUNGSI FETCH DATA (Polling) ---
-  // Fungsi ini jalan TERPISAH dari loading Highcharts
-  // Agar text data muncul duluan meskipun grafik belum siap.
   function getSensorData() {
     fetch('/homeLoad', { method: 'GET' })
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
@@ -60,9 +66,18 @@ document.addEventListener("DOMContentLoaded", () => {
         // B. Parse Sensor Data
         const DI_values = (data.DI && data.DI.value) || [0, 0, 0, 0];
         const DI_taskmode = (data.DI && data.DI.taskMode) || ['Normal', 'Counting', 'Cycle Time', 'Run Time'];
+        
         const AI_rawValues = (data.AI && data.AI.rawValue) || [0, 0, 0, 0];
         const AI_scaledValues = (data.AI && data.AI.scaledValue) || [0, 0, 0, 0];
         const enabled_AI = Array.isArray(data.enAI) ? data.enAI : [1, 1, 1, 1];
+
+        // [UPDATED] Update Analog Input Status (Hanya Scaled Value)
+        for (let i = 0; i < 4; i++) {
+          if (aiScaledInputs[i]) {
+             // Tampilkan Scaled Value dengan 2 angka di belakang koma
+             aiScaledInputs[i].value = AI_scaledValues[i] !== undefined ? parseFloat(AI_scaledValues[i]).toFixed(2) : '0.00';
+          }
+        }
 
         // C. Update Digital Input UI
         for (let i = 0; i < 4; i++) {
@@ -135,13 +150,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     const script = document.createElement('script');
-    // Coba load dari SPIFFS (Local) dulu agar cepat
     script.src = 'js/highcharts.js';
-
     script.onload = callback;
     script.onerror = () => {
       console.warn("Local Highcharts failed, trying CDN...");
-      // Fallback ke CDN jika file lokal tidak ada
       const cdnScript = document.createElement('script');
       cdnScript.src = 'https://code.highcharts.com/highcharts.js';
       cdnScript.onload = callback;
@@ -151,16 +163,12 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // --- 4. MAIN EXECUTION ---
-
-  // A. Mulai Polling Data Text SEKARANG (Agar dashboard terasa cepat)
   getSensorData();
   setInterval(getSensorData, 2000);
 
-  // B. Mulai Download Highcharts di Background
   loadHighcharts(() => {
     console.log("Highcharts Loaded!");
 
-    // Inisialisasi Chart T (Raw)
     chartT = new Highcharts.Chart({
       chart: { renderTo: 'chartSensor', type: 'line' },
       title: { text: 'Analog Input Raw Value' },
@@ -182,7 +190,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
 
-    // Inisialisasi Chart S (Scaled)
     chartS = new Highcharts.Chart({
       chart: { renderTo: 'chartSensorScaled', type: 'line' },
       title: { text: 'Analog Input Scaled Value' },
