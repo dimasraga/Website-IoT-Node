@@ -1957,32 +1957,50 @@ void handleEthernetClient()
       // --- 1. GET VALUE
       if (basePath == "/getValue")
       {
-        if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100)))
-        {
-          DynamicJsonDocument docTemp(4096);
-          JsonArray arr = docTemp.to<JsonArray>();
-          JsonObject root = jsonSend.as<JsonObject>();
+        // Header HTTP
+        client.println("HTTP/1.1 200 OK");
+        client.println("Content-Type: application/json");
+        client.println("Access-Control-Allow-Origin: *");
+        client.println("Connection: close");
+        client.println();
 
-          for (JsonPair kv : root)
+        // 1. Siapkan Buffer JSON Lokal
+        DynamicJsonDocument docTemp(8192);
+        JsonArray arr = docTemp.to<JsonArray>();
+
+        // 2. AMBIL DATA ANALOG (REAL-TIME, LANGSUNG DARI SUMBER)
+        // Gunakan i2cMutex sebentar (max 50ms) agar data aman
+        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)))
+        {
+          for (int i = 1; i <= jumlahInputAnalog; i++)
           {
-            if (String(kv.key().c_str()) == "-")
-              continue;
-            JsonObject item = arr.createNestedObject();
-            item["KodeSensor"] = kv.key().c_str();
-            item["Value"] = kv.value().as<String>();
+            if (analogInput[i].name != "")
+            {
+              JsonObject item = arr.createNestedObject();
+              item["KodeSensor"] = analogInput[i].name;
+              // Baca mapValue langsung (ini yang bikin cepat!)
+              item["Value"] = String(analogInput[i].mapValue, 2);
+            }
           }
-
-          String realtimeJson;
-          serializeJson(docTemp, realtimeJson);
-          xSemaphoreGive(jsonMutex);
-          client.print(realtimeJson);
+          xSemaphoreGive(i2cMutex);
         }
-        else
+
+        // 3. AMBIL DATA DIGITAL (REAL-TIME)
+        for (int i = 1; i <= jumlahInputDigital; i++)
         {
-          client.print("[]");
+          if (digitalInput[i].name != "")
+          {
+            JsonObject item = arr.createNestedObject();
+            item["KodeSensor"] = digitalInput[i].name;
+            item["Value"] = String(digitalInput[i].value, 0);
+          }
         }
-      }
 
+        // 4. Kirim Data ke Browser
+        String response;
+        serializeJson(docTemp, response);
+        client.print(response);
+      }
       // --- 2. GET CURRENT VALUE (ANALOG/DIGITAL REALTIME) ---
       else if (basePath == "/getCurrentValue")
       {
@@ -3092,7 +3110,7 @@ void setup()
   sdMutex = xSemaphoreCreateMutex();
   jsonMutex = xSemaphoreCreateMutex();
   modbusMutex = xSemaphoreCreateMutex();
-  queueSensorData = xQueueCreate(10, sizeof(SensorDataPacket));
+  queueSensorData = xQueueCreate(50, sizeof(SensorDataPacket));
   queueModbusData = xQueueCreate(10, sizeof(ModbusDataPacket));
   queueLogData = xQueueCreate(10, sizeof(LogDataPacket));
 
@@ -3518,19 +3536,39 @@ void setupWebServer()
 
   server.on("/getValue", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      String realtimeJson;
-      // Gunakan Mutex agar tidak crash saat membaca data live
-      if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100))) 
-      {
-          // Ambil data dari jsonSend (Variable Live Update) BUKAN sendString
-          serializeJson(jsonSend, realtimeJson); 
-          xSemaphoreGive(jsonMutex);
-      } 
-      else 
-      {
-          realtimeJson = "{}"; // Kirim kosong jika sistem sibuk
-      }
-      request->send(200, "application/json", realtimeJson); });
+    // 1. Siapkan container JSON baru (Lokal)
+    DynamicJsonDocument docTemp(8192); // Buffer besar biar aman
+    JsonArray arr = docTemp.to<JsonArray>();
+
+    // 2. AMBIL DATA ANALOG (Langsung "mencuri" data dari Task Sensor)
+    // Gunakan i2cMutex sebentar agar data tidak crash saat dibaca
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50))) {
+        for (int i = 1; i <= jumlahInputAnalog; i++) {
+            if (analogInput[i].name != "") {
+                JsonObject item = arr.createNestedObject();
+                item["KodeSensor"] = analogInput[i].name;
+                
+                // INI KUNCINYA: Baca langsung "mapValue" (Real-time)
+                item["Value"] = String(analogInput[i].mapValue, 2); 
+            }
+        }
+        xSemaphoreGive(i2cMutex); // Segera lepaskan setelah baca
+    }
+
+    // 3. AMBIL DATA DIGITAL (Langsung juga)
+    for (int i = 1; i <= jumlahInputDigital; i++) {
+        if (digitalInput[i].name != "") {
+            JsonObject item = arr.createNestedObject();
+            item["KodeSensor"] = digitalInput[i].name;
+            item["Value"] = String(digitalInput[i].value, 0);
+        }
+    }
+
+    // 4. Kirim ke Browser
+    String response;
+    serializeJson(docTemp, response);
+    request->send(200, "application/json", response); });
+
   server.on("/getCurrentValue", HTTP_GET, [](AsyncWebServerRequest *request)
             {
       if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100))) 
