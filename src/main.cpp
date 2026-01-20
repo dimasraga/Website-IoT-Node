@@ -127,8 +127,8 @@ float filterSensor(float filterVar, float filterResult_1, float fc);
 float mapFloat(float x, float in_min, float in_max, float out_min, float out_max);
 float calculate_Measurement(float mA, float minRange, float maxRange);
 
-unsigned int readModbusNonBlocking(unsigned int modbusAddress, unsigned int funCode, unsigned int regAddress, unsigned int timeoutMs);
-unsigned int readModbusNonBlocking(unsigned int modbusAddress, unsigned int funCode, unsigned int regAddress, unsigned int timeoutMs);
+// Update deklarasi agar cocok dengan definisi di bawah (tambah bool &success)
+unsigned int readModbusNonBlocking(unsigned int modbusAddress, unsigned int funCode, unsigned int regAddress, unsigned int timeoutMs, bool &success);
 unsigned int readModbus(unsigned int modbusAddress, unsigned int funCode, unsigned int regAddress);
 unsigned int crcModbus(unsigned int crc[], byte start, byte sizeArray);
 unsigned int parseByte(unsigned int bytes, bool byteOrder);
@@ -1973,7 +1973,7 @@ void handleEthernetClient()
           }
 
           String realtimeJson;
-          serializeJson(jsonSend, realtimeJson);
+          serializeJson(docTemp, realtimeJson);
           xSemaphoreGive(jsonMutex);
           client.print(realtimeJson);
         }
@@ -2771,20 +2771,23 @@ void Task_ModbusClient(void *parameter)
   ESP_LOGI("Core1", "Modbus Client Task started");
   unsigned long lastModbusRead = 0;
   unsigned long lastWatchdogFeed = 0;
+
   while (true)
   {
-    // Cek Timer sesuai Scan Rate (Misal tiap 1 detik)
+    // Reset Watchdog
     if (millis() - lastWatchdogFeed >= 5000)
     {
-      esp_task_wdt_reset(); // Reset watchdog manual
+      esp_task_wdt_reset();
       lastWatchdogFeed = millis();
     }
+
+    // Cek Timer Scan Rate
     if (millis() - lastModbusRead >= (modbusParam.scanRate * 1000))
     {
       int totalParamsToRead = 0;
 
       // 1. Ambil Jumlah Sensor
-      if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(200)))
+      if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(500)))
       {
         deserializeJson(jsonParam, stringParam);
         JsonArray nameData = jsonParam["nameData"];
@@ -2792,72 +2795,92 @@ void Task_ModbusClient(void *parameter)
         xSemaphoreGive(jsonMutex);
       }
 
-      // PRINT HEADER (Agar mirip Digital Input Status)
+      // 2. CETAK HEADER TABEL (Hanya jika ada sensor)
       if (totalParamsToRead > 0)
       {
         Serial.println("\n=== MODBUS DATA MONITOR ===");
+        // Format Header mirip Analog/Digital Monitor
+        Serial.println("ID | Name            | Value    | Raw   | Addr:Reg  | Status");
+        Serial.println("---|-----------------|----------|-------|-----------|--------");
       }
 
-      // 2. LOOPING SEMUA PARAMETER
+      // 3. LOOPING SENSOR & CETAK BARIS
       for (int i = 0; i < totalParamsToRead; i++)
       {
         String currentParamName = "";
         unsigned int addr = 0, fc = 0, reg = 0;
         float multiplier = 1.0;
         bool validParam = false;
+        bool readSuccess = false; // Flag status bacaan
 
-        // A. Ambil Konfigurasi Sensor ke-i
-        if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(50)))
+        // A. Ambil Config Sensor ke-i
+        if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(200)))
         {
           JsonArray nameData = jsonParam["nameData"];
-          currentParamName = nameData[i].as<String>();
-
-          JsonArray paramArray = jsonParam[currentParamName];
-          addr = paramArray[0];       // Slave ID
-          fc = paramArray[1];         // Function Code
-          reg = paramArray[2];        // Register
-          multiplier = paramArray[3]; // Scaling
-
-          validParam = true;
+          if (i < nameData.size())
+          {
+            currentParamName = nameData[i].as<String>();
+            if (jsonParam.containsKey(currentParamName))
+            {
+              JsonArray paramArray = jsonParam[currentParamName];
+              addr = paramArray[0];
+              fc = paramArray[1];
+              reg = paramArray[2];
+              multiplier = paramArray[3];
+              validParam = true;
+            }
+          }
           xSemaphoreGive(jsonMutex);
         }
 
-        // B. Baca Sensor
+        // B. Eksekusi Baca & Cetak Baris
         if (validParam)
         {
-          // Panggil fungsi readModbus (pastikan fungsi ini sudah dibersihkan Serial.print-nya)
-          unsigned int rawValue = readModbusNonBlocking(addr, fc, reg, 100);
+          // Panggil fungsi baru dengan parameter '&readSuccess'
+          unsigned int rawValue = readModbusNonBlocking(addr, fc, reg, 250, readSuccess);
           float finalValue = rawValue * multiplier;
 
-          Serial.printf("MB-%d [%-15s]: %-8.2f | RAW: %-5u | ID: %d | Reg: %d\n",
-                        i + 1,                    // Nomor Urut
-                        currentParamName.c_str(), // Nama Parameter (dari JSON)
-                        finalValue,               // Nilai setelah dikali scaling
-                        rawValue,                 // Nilai Asli dari Modbus
-                        addr,                     // Slave ID
-                        reg                       // Register Address
-          );
+          // Potong nama jika terlalu panjang agar tabel rapi
+          String dispName = currentParamName;
+          if (dispName.length() > 15)
+            dispName = dispName.substring(0, 15);
 
-          // D. Simpan ke JSON Send (Untuk Web/MQTT)
-          if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(200)))
+          // CETAK BARIS DATA (Format Tabel Rapi)
+          // M%-2d  : Nomor urut (M1, M2...)
+          // %-15s  : Nama rata kiri 15 char
+          // %8.2f  : Nilai float (8 digit total, 2 desimal)
+          // %-5u   : Nilai Raw rata kiri
+          // %02d:%04d : Format Alamat (SlaveID:Register)
+          Serial.printf("M%-2d| %-15s | %8.2f | %-5u | %02d:%-5d | %s\n",
+                        i + 1,
+                        dispName.c_str(),
+                        readSuccess ? finalValue : 0.00, // Tampilkan 0 jika gagal
+                        rawValue,
+                        addr, reg,
+                        readSuccess ? "OK" : "TIMEOUT"); // Status Text
+
+          // Update ke JSON Send untuk Web/MQTT
+          if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100)))
           {
-            jsonSend[currentParamName] = String(finalValue, 2);
+            if (currentParamName.length() > 0)
+            {
+              // Jika timeout, opsional: jangan update atau update 0
+              if (readSuccess)
+                jsonSend[currentParamName] = String(finalValue, 2);
+            }
             xSemaphoreGive(jsonMutex);
           }
         }
-        // Beri jeda sedikit antar sensor agar RS485 stabil
-        vTaskDelay(pdMS_TO_TICKS(10));
-      }
 
-      if (totalParamsToRead > 0)
-      {
+        // Jeda antar sensor agar stabil
+        vTaskDelay(pdMS_TO_TICKS(50));
       }
-
       lastModbusRead = millis();
     }
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
+
 // ============================================================================
 // CORE 1 TASK: Data Logger & HTTP Sender (VERSI FINAL - ANTI CRASH)
 // ============================================================================
@@ -2870,9 +2893,7 @@ void Task_DataLogger(void *parameter)
   unsigned long lastSendTime = 0;
   unsigned long lastSDSave = 0;
   unsigned long lastPrint = 0;
-  unsigned long lastWatchdogFeed = 0; // ✅ TAMBAH
-
-  // ✅ ALOKASI DI LUAR LOOP (Sekali saja!)
+  unsigned long lastWatchdogFeed = 0;
   DynamicJsonDocument docNew(1024);
   DynamicJsonDocument docSD(1024);
 
@@ -3961,89 +3982,76 @@ float filterSensor(float filterVar, float filterResult_1, float fc)
 
   return filterResult;
 }
-unsigned int readModbusNonBlocking(unsigned int modbusAddress, unsigned int funCode, unsigned int regAddress, unsigned int timeoutMs)
+unsigned int readModbusNonBlocking(unsigned int modbusAddress, unsigned int funCode, unsigned int regAddress, unsigned int timeoutMs, bool &success)
 {
   unsigned int buffSend[8];
   unsigned int crcValue;
-  unsigned int returnValue = 0;
-  byte buffModbus[128]; // Buffer diperbesar
+  byte buffModbus[64];
   int resIndex = 0;
+  success = false; // Default gagal
 
-  // 1. Bersihkan Buffer Serial sebelum kirim (Flush RX)
-  while (SerialModbus.available())
+  // 1. Bersihkan Buffer
+  int flushLimit = 0;
+  while (SerialModbus.available() && flushLimit < 100)
   {
     SerialModbus.read();
-    vTaskDelay(1);
+    flushLimit++;
+    delay(1);
   }
 
-  // 2. Siapkan Request Frame
+  // 2. Siapkan Request
   buffSend[0] = modbusAddress;
   buffSend[1] = funCode;
   buffSend[2] = parseByte(regAddress, 1);
   buffSend[3] = parseByte(regAddress, 0);
   buffSend[4] = 0;
-  buffSend[5] = 1; // Minta 1 Register
+  buffSend[5] = 1; // Minta 1 Register (Ubah ke 2 jika sensor Float)
+
   crcValue = crcModbus(buffSend, 0, 6);
   buffSend[6] = parseByte(crcValue, 1);
   buffSend[7] = parseByte(crcValue, 0);
 
-  // 3. Kirim Request
+  // 3. Kirim
   for (byte j = 0; j < 8; j++)
   {
     SerialModbus.write(buffSend[j]);
   }
-  SerialModbus.flush(); // Tunggu sampai data benar-benar terkirim
+  SerialModbus.flush();
 
-  // 4. Tunggu Respon (Smart Wait)
-  unsigned long startTime = millis();
-  bool dataDetected = false;
-
-  // Tunggu byte pertama datang
-  while ((millis() - startTime) < timeoutMs)
+  // 4. Tunggu Respon
+  unsigned long startWait = millis();
+  bool dataComing = false;
+  while (millis() - startWait < timeoutMs)
   {
     if (SerialModbus.available())
     {
-      dataDetected = true;
+      dataComing = true;
       break;
     }
-    vTaskDelay(1); // Yield agar task lain tidak macet
+    vTaskDelay(1);
   }
 
-  if (!dataDetected)
+  if (!dataComing)
+    return 0; // Timeout
+
+  // 5. Baca Data
+  vTaskDelay(pdMS_TO_TICKS(20)); // Tunggu buffer penuh
+  while (SerialModbus.available() && resIndex < 60)
   {
-    return 0; // Timeout: Tidak ada balasan sama sekali
+    buffModbus[resIndex] = SerialModbus.read();
+    resIndex++;
   }
 
-  // 5. Baca Data (Looping sampai data habis / silent)
-  // Logic: Baca terus selama masih ada data, atau sampai "diam" selama >10ms (tanda paket selesai)
-  unsigned long lastByteTime = millis();
-  while ((millis() - lastByteTime) < 20)
-  { // Tunggu silence gap 20ms
-    if (SerialModbus.available())
-    {
-      buffModbus[resIndex] = SerialModbus.read();
-      resIndex++;
-      if (resIndex >= 120)
-        break;                 // Safety buffer overflow
-      lastByteTime = millis(); // Reset timer setiap ada data masuk
-    }
-    else
-    {
-      vTaskDelay(1); // Yield sedikit saat menunggu byte berikutnya
-    }
-  }
-
-  // 6. Validasi & Parsing Data
-  // Minimal respon valid: ID + FC + ByteCount + DataH + DataL + CRC_L + CRC_H = 7 bytes
+  // 6. Validasi
+  unsigned int returnValue = 0;
   if (resIndex >= 5)
   {
-    // Cek alamat dan function code (validasi dasar)
     if (buffModbus[0] == modbusAddress && buffModbus[1] == funCode)
     {
       if (funCode == 3 || funCode == 4)
       {
-        // Gabungkan Byte High & Low
         returnValue = (buffModbus[3] << 8) | buffModbus[4];
+        success = true; // Data Valid!
       }
     }
   }
