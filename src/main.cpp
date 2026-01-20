@@ -2446,6 +2446,7 @@ void Task_DataAcquisition(void *parameter)
   static unsigned long lastDebounceTime[jumlahInputDigital + 1] = {0};
   static int stableState[jumlahInputDigital + 1] = {0};
   const unsigned long debounceDelay = 50;
+  static float prevFilteredMA[jumlahInputAnalog + 1] = {0.0};
   while (true)
   {
     bool useTCP = (networkSettings.protocolMode2.indexOf("TCP") >= 0);
@@ -2460,88 +2461,133 @@ void Task_DataAcquisition(void *parameter)
       {
         for (byte i = 1; i < jumlahInputAnalog + 1; i++)
         {
-          // 1. Read Hardware Voltage
-          valueADC = ads.readADC(i - 1);
-          float voltage = valueADC * 0.0001875; // Gain 0 (+/- 6.144V range)
+          // -----------------------------------------------------------
+          // 1. OVERSAMPLING (Mengambil rata-rata dari banyak sampel)
+          // Ini membuang noise frekuensi tinggi (hardware noise)
+          // -----------------------------------------------------------
+          long totalADC = 0;
+          int samples = 10; // Ambil 10 sampel sekaligus
+          for (int k = 0; k < samples; k++)
+          {
+            totalADC += ads.readADC(i - 1);
+          }
+          // Rata-rata nilai ADC
+          float avgADC = (float)totalADC / samples;
+
+          // Konversi ke Tegangan Fisik
+          float voltage = avgADC * 0.0001875; // Gain 0 (+/- 6.144V range)
           float shuntResistor = 250.0;
+
+          // Hitung Arus (mA) Mentah
           float currentMA = (voltage / shuntResistor) * 1000.0;
 
-          float customRaw = 0.0; // Nilai ADC/Raw simulasi (0-65535)
-          float rawResult = 0.0; // Nilai hasil konversi (Engineering Value) sementara
+          // -----------------------------------------------------------
+          // 2. FILTERING MATEMATIKA (Low Pass Filter)
+          // Diterapkan pada nilai 'currentMA' agar Raw & Scaled sama-sama stabil
+          // -----------------------------------------------------------
+          float cleanMA = currentMA;
 
-          // 3. TUNING FINE-ADJUSTMENT & MAPPING RAW
-          float tuningMaxmA = 20.0;
-          customRaw = mapFloat(currentMA, 0.0, tuningMaxmA, 0.0, 65535.0);
-
-          // -----------------------------------------------------------------
-          // LOGIKA SENSOR (Calculate rawResult dulu, jangan langsung ke mapValue)
-          // -----------------------------------------------------------------
-          if (analogInput[i].inputType == "4-20 mA")
-          {
-            // Deteksi Putus Kabel (< 3.0 mA)
-            if (currentMA < 3.0)
-            {
-              customRaw = 0;
-              rawResult = analogInput[i].lowLimit; // Pakai batas bawah jika putus
-            }
-            else
-            {
-              if (analogInput[i].scaling)
-                rawResult = calculate_Measurement(currentMA, analogInput[i].lowLimit, analogInput[i].highLimit);
-              else
-                rawResult = currentMA;
-            }
-          }
-          else if (analogInput[i].inputType == "0-20 mA")
-          {
-            if (currentMA < 0)
-              currentMA = 0;
-            if (analogInput[i].scaling)
-              rawResult = mapFloat(currentMA, 0.0, 20.0, analogInput[i].lowLimit, analogInput[i].highLimit);
-            else
-              rawResult = currentMA;
-          }
-          else if (analogInput[i].inputType == "0-10 V")
-          {
-            if (voltage < 0)
-              voltage = 0;
-            float tuningMaxVolt = 10.0;
-            customRaw = mapFloat(voltage, 0.0, tuningMaxVolt, 0.0, 65535.0);
-
-            if (analogInput[i].scaling)
-              rawResult = mapFloat(voltage, 0.0, 10.0, analogInput[i].lowLimit, analogInput[i].highLimit);
-            else
-              rawResult = voltage;
-          }
           if (analogInput[i].filter)
           {
-            // Ambil koefisien filter dari settingan (filterPeriod)
-            // Semakin KECIL nilai fc (misal 0.1), semakin STABIL (tapi lambat naik turunnya)
-            float fc = (analogInput[i].filterPeriod > 0.01) ? analogInput[i].filterPeriod : 1.0;
+            // Ambil koefisien filter (Semakin kecil nilainya, semakin smooth/lambat)
+            // Default 0.5 jika user input aneh-aneh
+            float fc = (analogInput[i].filterPeriod > 0.001) ? analogInput[i].filterPeriod : 0.5;
 
-            // Lakukan filtering: Nilai Baru = (alpha * Input) + ((1-alpha) * Nilai Lama)
-            analogInput[i].mapValue = filterSensor(rawResult, analogInput[i].mapValue, fc);
+            // Terapkan filter ke currentMA (bukan ke hasil akhir)
+            // Ini membuat 'prevFilteredMA' menyimpan sejarah kemulusan sinyal
+            cleanMA = filterSensor(currentMA, prevFilteredMA[i], fc);
+
+            // Simpan untuk perhitungan loop berikutnya
+            prevFilteredMA[i] = cleanMA;
           }
           else
           {
-            // Jika filter tidak dicentang, langsung pakai nilai mentah (Goyang/Responsif)
-            analogInput[i].mapValue = rawResult;
+            // Jika filter mati, reset buffer history agar responsif saat dinyalakan nanti
+            prevFilteredMA[i] = currentMA;
           }
-          // 5. SATURATION CLAMPING
+
+          // -----------------------------------------------------------
+          // 3. MAPPING KE RAW VALUE (0 - 65535)
+          // Sekarang Raw Value dihitung dari 'cleanMA' yang sudah stabil
+          // -----------------------------------------------------------
+          float tuningMaxmA = 20.0;
+          float tuningMaxVolt = 10.0;
+          float customRaw = 0.0;
+
+          if (analogInput[i].inputType.indexOf("V") >= 0)
+          {
+            // Mode Voltage: Gunakan voltage yg difilter (cleanMA dikembalikan ke Volt)
+            float cleanVolt = (cleanMA / 1000.0) * shuntResistor;
+            customRaw = mapFloat(cleanVolt, 0.0, tuningMaxVolt, 0.0, 65535.0);
+          }
+          else
+          {
+            // Mode Current
+            customRaw = mapFloat(cleanMA, 0.0, tuningMaxmA, 0.0, 65535.0);
+          }
+
+          // Saturation Clamping (Biar gak minus atau overflow)
           if (customRaw > 65535.0)
             customRaw = 65535.0;
           if (customRaw < 0.0)
             customRaw = 0.0;
 
-          // 6. Store Data
+          // Simpan Raw Value Stabil ke Global Variable
           analogInput[i].adcValue = customRaw;
 
-          if (analogInput[i].calibration)
+          // -----------------------------------------------------------
+          // 4. MAPPING KE SCALED VALUE (Engineering Unit)
+          // -----------------------------------------------------------
+          float finalResult = 0.0;
+
+          if (analogInput[i].inputType == "4-20 mA")
           {
-            analogInput[i].mapValue = (analogInput[i].mapValue * analogInput[i].mValue) + analogInput[i].cValue;
+            // Deteksi Putus Kabel (< 3.0 mA)
+            if (cleanMA < 3.0)
+            {
+              customRaw = 0; // Force Raw 0 jika putus
+              analogInput[i].adcValue = 0;
+              finalResult = analogInput[i].lowLimit;
+            }
+            else
+            {
+              if (analogInput[i].scaling)
+                finalResult = calculate_Measurement(cleanMA, analogInput[i].lowLimit, analogInput[i].highLimit);
+              else
+                finalResult = cleanMA;
+            }
+          }
+          else if (analogInput[i].inputType == "0-20 mA")
+          {
+            if (cleanMA < 0)
+              cleanMA = 0;
+            if (analogInput[i].scaling)
+              finalResult = mapFloat(cleanMA, 0.0, 20.0, analogInput[i].lowLimit, analogInput[i].highLimit);
+            else
+              finalResult = cleanMA;
+          }
+          else if (analogInput[i].inputType == "0-10 V")
+          {
+            float cleanVolt = (cleanMA / 1000.0) * shuntResistor; // Reconstruct voltage
+            if (cleanVolt < 0)
+              cleanVolt = 0;
+
+            if (analogInput[i].scaling)
+              finalResult = mapFloat(cleanVolt, 0.0, 10.0, analogInput[i].lowLimit, analogInput[i].highLimit);
+            else
+              finalResult = cleanVolt;
           }
 
-          // Update Modbus
+          // 5. KALIBRASI (Offset / Gain Correction)
+          if (analogInput[i].calibration)
+          {
+            finalResult = (finalResult * analogInput[i].mValue) + analogInput[i].cValue;
+          }
+
+          // 6. Simpan Scaled Value Akhir
+          analogInput[i].mapValue = finalResult;
+
+          // Update Modbus Registers
           if (useTCP)
           {
             mbIP.Ireg(i + 9, (uint16_t)analogInput[i].adcValue);
@@ -3209,6 +3255,7 @@ void setup()
   {
     Serial.println("✅ ADS1115 Initialized");
     ads.setGain(0);
+    ads.setDataRate(7);
   }
 
   // Init Variables
