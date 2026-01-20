@@ -17,7 +17,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // Disable inputs (Visual Read-only)
   [networkMode, ssid, ipAddres, macAddress, jobNumber,
     protocolMode, endpoint, connStatus, sendInterval]
-    .forEach(el => { if (el) el.disabled = true; });
+  .forEach(el => {
+    if (el) el.disabled = true;
+  });
 
   // [UPDATED] Analog Input Elements Reference (Hanya Scaled Value)
   const aiScaledInputs = [
@@ -49,7 +51,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- 2. FUNGSI FETCH DATA (Polling) ---
   function getSensorData() {
-    fetch('/homeLoad', { method: 'GET' })
+    fetch('/homeLoad', {
+        method: 'GET'
+      })
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(data => {
         // A. Update Network Info
@@ -66,7 +70,7 @@ document.addEventListener("DOMContentLoaded", () => {
         // B. Parse Sensor Data
         const DI_values = (data.DI && data.DI.value) || [0, 0, 0, 0];
         const DI_taskmode = (data.DI && data.DI.taskMode) || ['Normal', 'Counting', 'Cycle Time', 'Run Time'];
-        
+
         const AI_rawValues = (data.AI && data.AI.rawValue) || [0, 0, 0, 0];
         const AI_scaledValues = (data.AI && data.AI.scaledValue) || [0, 0, 0, 0];
         const enabled_AI = Array.isArray(data.enAI) ? data.enAI : [1, 1, 1, 1];
@@ -74,8 +78,8 @@ document.addEventListener("DOMContentLoaded", () => {
         // [UPDATED] Update Analog Input Status (Hanya Scaled Value)
         for (let i = 0; i < 4; i++) {
           if (aiScaledInputs[i]) {
-             // Tampilkan Scaled Value dengan 2 angka di belakang koma
-             aiScaledInputs[i].value = AI_scaledValues[i] !== undefined ? parseFloat(AI_scaledValues[i]).toFixed(2) : '0.00';
+            // Tampilkan Scaled Value dengan 2 angka di belakang koma
+            aiScaledInputs[i].value = AI_scaledValues[i] !== undefined ? parseFloat(AI_scaledValues[i]).toFixed(2) : '0.00';
           }
         }
 
@@ -87,15 +91,15 @@ document.addEventListener("DOMContentLoaded", () => {
             const mode = DI_taskmode[i];
             diUnits[i].textContent =
               mode === 'Counting' ? 'pcs' :
-                mode === 'Cycle Time' ? 'sec' :
-                  mode === 'Run Time' ? 'min' :
-                    mode === 'Pulse Mode' ? 'Hz' : '.';
+              mode === 'Cycle Time' ? 'sec' :
+              mode === 'Run Time' ? 'min' :
+              mode === 'Pulse Mode' ? 'Hz' : '.';
           }
         }
 
-        // D. Update Grafik (HANYA JIKA HIGHCHARTS SUDAH LOAD)
+        // --- D. Update Grafik (HANYA JIKA HIGHCHARTS SUDAH LOAD) ---
         if (chartT && chartS) {
-          // 1. Atur Visibilitas (Sekali saja)
+          // 1. Atur Visibilitas (Sekali saja saat awal)
           if (firstRun) {
             for (let i = 0; i < enabled_AI.length && i < 4; i++) {
               const isVisible = enabled_AI[i] === 1;
@@ -107,22 +111,14 @@ document.addEventListener("DOMContentLoaded", () => {
             firstRun = false;
           }
 
-          // 2. Tentukan Waktu X-Axis
-          let x;
-          if (data.datetime && typeof data.datetime === 'string' && data.datetime.includes(' ')) {
-            const [dStr, tStr] = data.datetime.split(' ');
-            const [y, m, d] = dStr.split('-').map(v => parseInt(v, 10));
-            const [H, M, S] = tStr.split(':').map(v => parseInt(v, 10));
-            x = new Date(y, (m - 1), d, H, M, S).getTime() + (7 * 3600 * 1000);
-          } else {
-            x = Date.now();
-          }
+          // 2. Tentukan Waktu X-Axis (Gunakan Waktu Browser agar Grafik Mulus)
+          let x = (new Date()).getTime();
 
           // 3. Plot Data Raw
           const sensorRawValues = AI_rawValues.map(v => Math.round((v || 0) * 100) / 100);
           sensorRawValues.forEach((y, i) => {
             if (enabled_AI[i] === 1 && chartT.series[i]) {
-              const shift = chartT.series[i].data.length > 40;
+              const shift = chartT.series[i].data.length > 300;
               chartT.series[i].addPoint([x, y], false, shift, true);
             }
           });
@@ -132,12 +128,12 @@ document.addEventListener("DOMContentLoaded", () => {
           const sensorScaledValues = AI_scaledValues.map(v => Math.round((v || 0) * 100) / 100);
           sensorScaledValues.forEach((y, i) => {
             if (enabled_AI[i] === 1 && chartS.series[i]) {
-              const shift = chartS.series[i].data.length > 40;
+              const shift = chartS.series[i].data.length > 300;
               chartS.series[i].addPoint([x, y], false, shift, true);
             }
           });
           chartS.redraw();
-        }
+        } // <--- INI YANG HILANG SEBELUMNYA
       })
       .catch(err => console.error('Data fetch error:', err));
   }
@@ -164,26 +160,64 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // --- 4. MAIN EXECUTION ---
   getSensorData();
-  setInterval(getSensorData, 2000);
+  setInterval(getSensorData, 1000);
 
   loadHighcharts(() => {
     console.log("Highcharts Loaded!");
 
     chartT = new Highcharts.Chart({
-      chart: { renderTo: 'chartSensor', type: 'line' },
-      title: { text: 'Analog Input Raw Value' },
-      series: [
-        { name: 'AI 1: ', data: [], color: '#ef4444' },
-        { name: 'AI 2: ', data: [], color: '#22c55e' },
-        { name: 'AI 3: ', data: [], color: '#3b82f6' },
-        { name: 'AI 4: ', data: [], color: '#eab308' },
+      chart: {
+        renderTo: 'chartSensor',
+        type: 'line'
+      },
+      title: {
+        text: 'Analog Input Raw Value'
+      },
+      series: [{
+          name: 'AI 1: ',
+          data: [],
+          color: '#ef4444'
+        },
+        {
+          name: 'AI 2: ',
+          data: [],
+          color: '#22c55e'
+        },
+        {
+          name: 'AI 3: ',
+          data: [],
+          color: '#3b82f6'
+        },
+        {
+          name: 'AI 4: ',
+          data: [],
+          color: '#eab308'
+        },
       ],
-      plotOptions: { line: { animation: false, dataLabels: { enabled: false } } },
-      xAxis: { type: 'datetime', dateTimeLabelFormats: { second: '%H:%M:%S' } },
-      yAxis: { title: { text: 'ADC Value' } },
-      credits: { enabled: false },
+      plotOptions: {
+        line: {
+          animation: false,
+          dataLabels: {
+            enabled: false
+          }
+        }
+      },
+      xAxis: {
+        type: 'datetime',
+        dateTimeLabelFormats: {
+          second: '%H:%M:%S'
+        }
+      },
+      yAxis: {
+        title: {
+          text: 'ADC Value'
+        }
+      },
+      credits: {
+        enabled: false
+      },
       legend: {
-        labelFormatter: function () {
+        labelFormatter: function() {
           const pt = this.data.length ? this.data[this.data.length - 1] : null;
           return this.name + (pt ? pt.y : 'N/A');
         }
@@ -191,20 +225,58 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     chartS = new Highcharts.Chart({
-      chart: { renderTo: 'chartSensorScaled', type: 'line' },
-      title: { text: 'Analog Input Scaled Value' },
-      series: [
-        { name: 'AI 1: ', data: [], color: '#ef4444' },
-        { name: 'AI 2: ', data: [], color: '#22c55e' },
-        { name: 'AI 3: ', data: [], color: '#3b82f6' },
-        { name: 'AI 4: ', data: [], color: '#eab308' },
+      chart: {
+        renderTo: 'chartSensorScaled',
+        type: 'line'
+      },
+      title: {
+        text: 'Analog Input Scaled Value'
+      },
+      series: [{
+          name: 'AI 1: ',
+          data: [],
+          color: '#ef4444'
+        },
+        {
+          name: 'AI 2: ',
+          data: [],
+          color: '#22c55e'
+        },
+        {
+          name: 'AI 3: ',
+          data: [],
+          color: '#3b82f6'
+        },
+        {
+          name: 'AI 4: ',
+          data: [],
+          color: '#eab308'
+        },
       ],
-      plotOptions: { line: { animation: false, dataLabels: { enabled: false } } },
-      xAxis: { type: 'datetime', dateTimeLabelFormats: { second: '%H:%M:%S' } },
-      yAxis: { title: { text: 'Scaled Value' } },
-      credits: { enabled: false },
+      plotOptions: {
+        line: {
+          animation: false,
+          dataLabels: {
+            enabled: false
+          }
+        }
+      },
+      xAxis: {
+        type: 'datetime',
+        dateTimeLabelFormats: {
+          second: '%H:%M:%S'
+        }
+      },
+      yAxis: {
+        title: {
+          text: 'Scaled Value'
+        }
+      },
+      credits: {
+        enabled: false
+      },
       legend: {
-        labelFormatter: function () {
+        labelFormatter: function() {
           const pt = this.data.length ? this.data[this.data.length - 1] : null;
           return this.name + (pt ? pt.y : 'N/A');
         }
