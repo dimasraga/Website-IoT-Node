@@ -2655,20 +2655,25 @@ void Task_DataAcquisition(void *parameter)
     // ========================================================================
     if (millis() - lastDebugPrint >= 2000)
     {
+      // --- ANALOG MONITOR ---
       Serial.println("\n=== ANALOG INPUT MONITOR ===");
-      Serial.println("ID | Name            | Value    | Raw   | Type");
+      Serial.println("ID | Name                 | Value    | Raw   | Type");
       for (int i = 1; i <= jumlahInputAnalog; i++)
       {
-        Serial.printf("A%-2d| %-15s | %8.2f | %5.0f | %s\n", i,
-                      analogInput[i].name.c_str(),
+        // Potong nama jika lebih dari 20 karakter agar tabel tidak jebol
+        String dispName = analogInput[i].name;
+        if (dispName.length() > 20)
+          dispName = dispName.substring(0, 20);
+        Serial.printf("A%-2d| %-20s | %8.2f | %5.0f | %s\n", i,
+                      dispName.c_str(), // Gunakan nama yang sudah dipotong
                       analogInput[i].mapValue,
                       analogInput[i].adcValue,
                       analogInput[i].inputType.c_str());
       }
 
+      // --- DIGITAL MONITOR ---
       Serial.println("\n=== DIGITAL INPUT MONITOR ===");
-      Serial.println("ID | Name            | Value    | Mode         | Status");
-
+      Serial.println("ID | Name                 | Value    | Mode         | Status");
       for (int i = 1; i <= jumlahInputDigital; i++)
       {
         String statusStr;
@@ -2682,16 +2687,17 @@ void Task_DataAcquisition(void *parameter)
           statusStr = String(digitalInput[i].value, 2);
         else
           statusStr = (digitalInput[i].value > 0.5) ? "HIGH" : "LOW";
-
-        Serial.printf("D%-2d| %-15s | %-8.2f | %-12s | %s\n", i,
-                      digitalInput[i].name.c_str(),
+        String dispName = digitalInput[i].name;
+        if (dispName.length() > 20)
+          dispName = dispName.substring(0, 20);
+        Serial.printf("D%-2d| %-20s | %-8.2f | %-12s | %s\n", i,
+                      dispName.c_str(),
                       digitalInput[i].value,
                       (digitalInput[i].taskMode.length() > 0 ? digitalInput[i].taskMode.c_str() : "Normal"),
                       statusStr.c_str());
       }
       lastDebugPrint = millis();
     }
-
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
@@ -2801,7 +2807,6 @@ void Task_ModbusClient(void *parameter)
         Serial.println("\n=== MODBUS DATA MONITOR ===");
         // Format Header mirip Analog/Digital Monitor
         Serial.println("ID | Name            | Value    | Raw   | Addr:Reg  | Status");
-        Serial.println("---|-----------------|----------|-------|-----------|--------");
       }
 
       // 3. LOOPING SENSOR & CETAK BARIS
