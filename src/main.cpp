@@ -1957,50 +1957,32 @@ void handleEthernetClient()
       // --- 1. GET VALUE
       if (basePath == "/getValue")
       {
-        // Header HTTP
-        client.println("HTTP/1.1 200 OK");
-        client.println("Content-Type: application/json");
-        client.println("Access-Control-Allow-Origin: *");
-        client.println("Connection: close");
-        client.println();
-
-        // 1. Siapkan Buffer JSON Lokal
-        DynamicJsonDocument docTemp(8192);
-        JsonArray arr = docTemp.to<JsonArray>();
-
-        // 2. AMBIL DATA ANALOG (REAL-TIME, LANGSUNG DARI SUMBER)
-        // Gunakan i2cMutex sebentar (max 50ms) agar data aman
-        if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50)))
+        if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100)))
         {
-          for (int i = 1; i <= jumlahInputAnalog; i++)
-          {
-            if (analogInput[i].name != "")
-            {
-              JsonObject item = arr.createNestedObject();
-              item["KodeSensor"] = analogInput[i].name;
-              // Baca mapValue langsung (ini yang bikin cepat!)
-              item["Value"] = String(analogInput[i].mapValue, 2);
-            }
-          }
-          xSemaphoreGive(i2cMutex);
-        }
+          DynamicJsonDocument docTemp(4096);
+          JsonArray arr = docTemp.to<JsonArray>();
+          JsonObject root = jsonSend.as<JsonObject>();
 
-        // 3. AMBIL DATA DIGITAL (REAL-TIME)
-        for (int i = 1; i <= jumlahInputDigital; i++)
-        {
-          if (digitalInput[i].name != "")
+          for (JsonPair kv : root)
           {
+            if (String(kv.key().c_str()) == "-")
+              continue;
             JsonObject item = arr.createNestedObject();
-            item["KodeSensor"] = digitalInput[i].name;
-            item["Value"] = String(digitalInput[i].value, 0);
+            item["KodeSensor"] = kv.key().c_str();
+            item["Value"] = kv.value().as<String>();
           }
-        }
 
-        // 4. Kirim Data ke Browser
-        String response;
-        serializeJson(docTemp, response);
-        client.print(response);
+          String realtimeJson;
+          serializeJson(docTemp, realtimeJson);
+          xSemaphoreGive(jsonMutex);
+          client.print(realtimeJson);
+        }
+        else
+        {
+          client.print("[]");
+        }
       }
+
       // --- 2. GET CURRENT VALUE (ANALOG/DIGITAL REALTIME) ---
       else if (basePath == "/getCurrentValue")
       {
@@ -2439,21 +2421,23 @@ void Task_DataAcquisition(void *parameter)
   unsigned long lastReadDigital = 0;
   unsigned long lastDebugPrint = 0;
   unsigned long lastRunTimeCheck = 0;
-  int16_t valueADC;
-
+  
   // Variabel Debouncing Digital
   static int lastRawState[jumlahInputDigital + 1] = {0};
   static unsigned long lastDebounceTime[jumlahInputDigital + 1] = {0};
   static int stableState[jumlahInputDigital + 1] = {0};
   const unsigned long debounceDelay = 50;
-  static float prevFilteredMA[jumlahInputAnalog + 1] = {0.0};
+
+  // [TAMBAHAN] Buffer untuk filter kestabilan (menyimpan nilai mA sebelumnya)
+  static float prevFilteredMA[jumlahInputAnalog + 1] = {0.0}; 
+
   while (true)
   {
     bool useTCP = (networkSettings.protocolMode2.indexOf("TCP") >= 0);
     bool useRTU = (networkSettings.protocolMode2.indexOf("RTU") >= 0);
 
     // ========================================================================
-    // A. BACA ANALOG (Setiap 100ms)
+    // A. BACA ANALOG (Setiap 100ms) - DENGAN OVERSAMPLING & FILTERING
     // ========================================================================
     if (millis() - lastReadAnalog >= 100)
     {
@@ -2467,41 +2451,39 @@ void Task_DataAcquisition(void *parameter)
           // -----------------------------------------------------------
           long totalADC = 0;
           int samples = 10; // Ambil 10 sampel sekaligus
-          for (int k = 0; k < samples; k++)
-          {
+          for (int k = 0; k < samples; k++) {
             totalADC += ads.readADC(i - 1);
           }
           // Rata-rata nilai ADC
-          float avgADC = (float)totalADC / samples;
+          float avgADC = (float)totalADC / samples; 
 
           // Konversi ke Tegangan Fisik
           float voltage = avgADC * 0.0001875; // Gain 0 (+/- 6.144V range)
           float shuntResistor = 250.0;
-
+          
           // Hitung Arus (mA) Mentah
           float currentMA = (voltage / shuntResistor) * 1000.0;
-
+          
           // -----------------------------------------------------------
           // 2. FILTERING MATEMATIKA (Low Pass Filter)
           // Diterapkan pada nilai 'currentMA' agar Raw & Scaled sama-sama stabil
           // -----------------------------------------------------------
           float cleanMA = currentMA;
-
+          
           if (analogInput[i].filter)
           {
             // Ambil koefisien filter (Semakin kecil nilainya, semakin smooth/lambat)
             // Default 0.5 jika user input aneh-aneh
             float fc = (analogInput[i].filterPeriod > 0.001) ? analogInput[i].filterPeriod : 0.5;
-
+            
             // Terapkan filter ke currentMA (bukan ke hasil akhir)
             // Ini membuat 'prevFilteredMA' menyimpan sejarah kemulusan sinyal
             cleanMA = filterSensor(currentMA, prevFilteredMA[i], fc);
-
+            
             // Simpan untuk perhitungan loop berikutnya
-            prevFilteredMA[i] = cleanMA;
+            prevFilteredMA[i] = cleanMA; 
           }
-          else
-          {
+          else {
             // Jika filter mati, reset buffer history agar responsif saat dinyalakan nanti
             prevFilteredMA[i] = currentMA;
           }
@@ -2510,28 +2492,23 @@ void Task_DataAcquisition(void *parameter)
           // 3. MAPPING KE RAW VALUE (0 - 65535)
           // Sekarang Raw Value dihitung dari 'cleanMA' yang sudah stabil
           // -----------------------------------------------------------
-          float tuningMaxmA = 20.0;
+          float tuningMaxmA = 20.0; 
           float tuningMaxVolt = 10.0;
           float customRaw = 0.0;
 
-          if (analogInput[i].inputType.indexOf("V") >= 0)
-          {
-            // Mode Voltage: Gunakan voltage yg difilter (cleanMA dikembalikan ke Volt)
-            float cleanVolt = (cleanMA / 1000.0) * shuntResistor;
-            customRaw = mapFloat(cleanVolt, 0.0, tuningMaxVolt, 0.0, 65535.0);
-          }
-          else
-          {
-            // Mode Current
-            customRaw = mapFloat(cleanMA, 0.0, tuningMaxmA, 0.0, 65535.0);
+          if (analogInput[i].inputType.indexOf("V") >= 0) {
+             // Mode Voltage: Gunakan voltage yg difilter (cleanMA dikembalikan ke Volt)
+             float cleanVolt = (cleanMA / 1000.0) * shuntResistor; 
+             customRaw = mapFloat(cleanVolt, 0.0, tuningMaxVolt, 0.0, 65535.0);
+          } else {
+             // Mode Current
+             customRaw = mapFloat(cleanMA, 0.0, tuningMaxmA, 0.0, 65535.0);
           }
 
           // Saturation Clamping (Biar gak minus atau overflow)
-          if (customRaw > 65535.0)
-            customRaw = 65535.0;
-          if (customRaw < 0.0)
-            customRaw = 0.0;
-
+          if (customRaw > 65535.0) customRaw = 65535.0;
+          if (customRaw < 0.0) customRaw = 0.0;
+          
           // Simpan Raw Value Stabil ke Global Variable
           analogInput[i].adcValue = customRaw;
 
@@ -2543,14 +2520,12 @@ void Task_DataAcquisition(void *parameter)
           if (analogInput[i].inputType == "4-20 mA")
           {
             // Deteksi Putus Kabel (< 3.0 mA)
-            if (cleanMA < 3.0)
-            {
+            if (cleanMA < 3.0) {
               customRaw = 0; // Force Raw 0 jika putus
-              analogInput[i].adcValue = 0;
-              finalResult = analogInput[i].lowLimit;
+              analogInput[i].adcValue = 0; 
+              finalResult = analogInput[i].lowLimit; 
             }
-            else
-            {
+            else {
               if (analogInput[i].scaling)
                 finalResult = calculate_Measurement(cleanMA, analogInput[i].lowLimit, analogInput[i].highLimit);
               else
@@ -2559,8 +2534,7 @@ void Task_DataAcquisition(void *parameter)
           }
           else if (analogInput[i].inputType == "0-20 mA")
           {
-            if (cleanMA < 0)
-              cleanMA = 0;
+            if (cleanMA < 0) cleanMA = 0;
             if (analogInput[i].scaling)
               finalResult = mapFloat(cleanMA, 0.0, 20.0, analogInput[i].lowLimit, analogInput[i].highLimit);
             else
@@ -2568,11 +2542,10 @@ void Task_DataAcquisition(void *parameter)
           }
           else if (analogInput[i].inputType == "0-10 V")
           {
-            float cleanVolt = (cleanMA / 1000.0) * shuntResistor; // Reconstruct voltage
-            if (cleanVolt < 0)
-              cleanVolt = 0;
-
-            if (analogInput[i].scaling)
+             float cleanVolt = (cleanMA / 1000.0) * shuntResistor; // Reconstruct voltage
+             if (cleanVolt < 0) cleanVolt = 0;
+             
+             if (analogInput[i].scaling)
               finalResult = mapFloat(cleanVolt, 0.0, 10.0, analogInput[i].lowLimit, analogInput[i].highLimit);
             else
               finalResult = cleanVolt;
@@ -2588,13 +2561,11 @@ void Task_DataAcquisition(void *parameter)
           analogInput[i].mapValue = finalResult;
 
           // Update Modbus Registers
-          if (useTCP)
-          {
+          if (useTCP) {
             mbIP.Ireg(i + 9, (uint16_t)analogInput[i].adcValue);
             mbIP.Ireg(i - 1, analogInput[i].mapValue * 100);
           }
-          if (useRTU)
-          {
+          if (useRTU) {
             mbRTU.Ireg(i + 9, (uint16_t)analogInput[i].adcValue);
             mbRTU.Ireg(i - 1, analogInput[i].mapValue * 100);
           }
@@ -2721,6 +2692,7 @@ void Task_DataAcquisition(void *parameter)
     {
       // --- ANALOG MONITOR ---
       Serial.println("\n=== ANALOG INPUT MONITOR ===");
+      // Perlebar kolom Name jadi 20 karakter
       Serial.println("ID | Name                 | Value    | Raw   | Type");
       for (int i = 1; i <= jumlahInputAnalog; i++)
       {
@@ -2728,6 +2700,7 @@ void Task_DataAcquisition(void *parameter)
         String dispName = analogInput[i].name;
         if (dispName.length() > 20)
           dispName = dispName.substring(0, 20);
+
         Serial.printf("A%-2d| %-20s | %8.2f | %5.0f | %s\n", i,
                       dispName.c_str(), // Gunakan nama yang sudah dipotong
                       analogInput[i].mapValue,
@@ -2737,7 +2710,10 @@ void Task_DataAcquisition(void *parameter)
 
       // --- DIGITAL MONITOR ---
       Serial.println("\n=== DIGITAL INPUT MONITOR ===");
+      // Perlebar kolom Name jadi 20 karakter
       Serial.println("ID | Name                 | Value    | Mode         | Status");
+      Serial.println("---|----------------------|----------|--------------|--------");
+
       for (int i = 1; i <= jumlahInputDigital; i++)
       {
         String statusStr;
@@ -2751,9 +2727,13 @@ void Task_DataAcquisition(void *parameter)
           statusStr = String(digitalInput[i].value, 2);
         else
           statusStr = (digitalInput[i].value > 0.5) ? "HIGH" : "LOW";
+
+        // Potong nama jika lebih dari 20 karakter
         String dispName = digitalInput[i].name;
         if (dispName.length() > 20)
           dispName = dispName.substring(0, 20);
+
+        // Ubah %-15s menjadi %-20s
         Serial.printf("D%-2d| %-20s | %-8.2f | %-12s | %s\n", i,
                       dispName.c_str(),
                       digitalInput[i].value,
@@ -3156,7 +3136,7 @@ void setup()
   sdMutex = xSemaphoreCreateMutex();
   jsonMutex = xSemaphoreCreateMutex();
   modbusMutex = xSemaphoreCreateMutex();
-  queueSensorData = xQueueCreate(50, sizeof(SensorDataPacket));
+  queueSensorData = xQueueCreate(10, sizeof(SensorDataPacket));
   queueModbusData = xQueueCreate(10, sizeof(ModbusDataPacket));
   queueLogData = xQueueCreate(10, sizeof(LogDataPacket));
 
@@ -3583,39 +3563,19 @@ void setupWebServer()
 
   server.on("/getValue", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-    // 1. Siapkan container JSON baru (Lokal)
-    DynamicJsonDocument docTemp(8192); // Buffer besar biar aman
-    JsonArray arr = docTemp.to<JsonArray>();
-
-    // 2. AMBIL DATA ANALOG (Langsung "mencuri" data dari Task Sensor)
-    // Gunakan i2cMutex sebentar agar data tidak crash saat dibaca
-    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(50))) {
-        for (int i = 1; i <= jumlahInputAnalog; i++) {
-            if (analogInput[i].name != "") {
-                JsonObject item = arr.createNestedObject();
-                item["KodeSensor"] = analogInput[i].name;
-                
-                // INI KUNCINYA: Baca langsung "mapValue" (Real-time)
-                item["Value"] = String(analogInput[i].mapValue, 2); 
-            }
-        }
-        xSemaphoreGive(i2cMutex); // Segera lepaskan setelah baca
-    }
-
-    // 3. AMBIL DATA DIGITAL (Langsung juga)
-    for (int i = 1; i <= jumlahInputDigital; i++) {
-        if (digitalInput[i].name != "") {
-            JsonObject item = arr.createNestedObject();
-            item["KodeSensor"] = digitalInput[i].name;
-            item["Value"] = String(digitalInput[i].value, 0);
-        }
-    }
-
-    // 4. Kirim ke Browser
-    String response;
-    serializeJson(docTemp, response);
-    request->send(200, "application/json", response); });
-
+      String realtimeJson;
+      // Gunakan Mutex agar tidak crash saat membaca data live
+      if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100))) 
+      {
+          // Ambil data dari jsonSend (Variable Live Update) BUKAN sendString
+          serializeJson(jsonSend, realtimeJson); 
+          xSemaphoreGive(jsonMutex);
+      } 
+      else 
+      {
+          realtimeJson = "{}"; // Kirim kosong jika sistem sibuk
+      }
+      request->send(200, "application/json", realtimeJson); });
   server.on("/getCurrentValue", HTTP_GET, [](AsyncWebServerRequest *request)
             {
       if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100))) 
@@ -4048,9 +4008,6 @@ void modbusSlaveSetup()
   }
 }
 
-// ============================================================================
-// SUPPORT FUNCTIONS
-// ============================================================================
 float filterSensor(float filterVar, float filterResult_1, float fc)
 {
   // Safety check: Jika fc terlalu kecil, skip filter
