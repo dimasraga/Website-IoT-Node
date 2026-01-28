@@ -2525,7 +2525,7 @@ void Task_DataAcquisition(void *parameter)
           // Deteksi Kabel Putus (< 0.8V)
           if (analogInput[i].inputType == "4-20 mA")
           {
-            if (voltage < 0.8)
+            if (voltage < 0.2)
             {
               finalResult = analogInput[i].lowLimit;
               analogInput[i].adcValue = 0;
