@@ -1959,29 +1959,26 @@ void handleEthernetClient()
       // --- 1. GET VALUE
       if (basePath == "/getValue")
       {
+        // Beri timeout agar tidak konflik dengan Modbus Task
         if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100)))
         {
-          DynamicJsonDocument docTemp(4096);
-          JsonArray arr = docTemp.to<JsonArray>();
-          JsonObject root = jsonSend.as<JsonObject>();
-
-          for (JsonPair kv : root)
-          {
-            if (String(kv.key().c_str()) == "-")
-              continue;
-            JsonObject item = arr.createNestedObject();
-            item["KodeSensor"] = kv.key().c_str();
-            item["Value"] = kv.value().as<String>();
+          // PERBAIKAN UTAMA:
+          // Langsung kirim (stream) isi jsonSend ke website.
+          // JANGAN diubah jadi Array, dan JANGAN ditampung di String (hemat RAM).
+          
+          if (jsonSend.isNull() || jsonSend.size() == 0) {
+             client.print("{}"); // Kirim object kosong jika belum ada data
+          } else {
+             serializeJson(jsonSend, client); // Streaming langsung
           }
-
-          String realtimeJson;
-          serializeJson(docTemp, realtimeJson);
+          
           xSemaphoreGive(jsonMutex);
-          client.print(realtimeJson);
         }
         else
         {
-          client.print("[]");
+          // Jika sistem sibuk, kirim Object Kosong "{}" 
+          // JANGAN kirim Array "[]" karena akan bikin website error
+          client.print("{}");
         }
       }
 
