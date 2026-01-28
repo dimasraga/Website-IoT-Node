@@ -2416,7 +2416,7 @@ void Task_NetworkManagement(void *parameter)
 // CORE 1 TASK: Data Acquisition (Analog & Digital Input)
 void Task_DataAcquisition(void *parameter)
 {
-  ESP_LOGI("Core1", "Data Acquisition Task started (Direct Mode)");
+  ESP_LOGI("Core1", "Data Acquisition Task started (Direct Mo257de)");
 
   SensorDataPacket sensorData;
   unsigned long lastReadAnalog = 0;
@@ -2433,7 +2433,7 @@ void Task_DataAcquisition(void *parameter)
   // 1. SET KECEPATAN ADS MAKSIMAL (Biar hardware tidak delay)
   if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)))
   {
-    ads.setDataRate(RATE_ADS1115_128SPS); // Turbo Mode
+    ads.setDataRate(RATE_ADS1015_3300SPS); // Turbo Mode
     // ads.setDataRate(RATE_ADS1115_8SPS);
     xSemaphoreGive(i2cMutex);
   }
