@@ -2433,7 +2433,7 @@ void Task_DataAcquisition(void *parameter)
   // 1. SET KECEPATAN ADS MAKSIMAL (Biar hardware tidak delay)
   if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)))
   {
-    ads.setDataRate(RATE_ADS1115_250SPS); // Turbo Mode
+    ads.setDataRate(RATE_ADS1115_128SPS); // Turbo Mode
     // ads.setDataRate(RATE_ADS1115_8SPS);
     xSemaphoreGive(i2cMutex);
   }
@@ -2465,15 +2465,24 @@ void Task_DataAcquisition(void *parameter)
           // 2. HITUNG RAW X
           // Dengan GAIN_ONE (voltage/4.096), range: 15990-62912
           // Mapping ke standar ADS1115: 13107-65535 (1V-5V)
-          float raw_base = (voltage / 4.096) * 65535.0;
-          
-          // Linear mapping: raw_mapped = ((raw_base - 15990) * 1.11734368) + 13107
-          float raw_x = ((raw_base - 15990.0) * 1.11734368) + 13107.0;
-          
+          float raw_x;
+
+          // 1. Handle Deadband (Below 4mA / 0.4V)
+          if (voltage <= 0.40)
+          {
+            raw_x = 13107.0;
+          }
+          else
+          {
+            // 2. Linear Interpolation
+            // Voltage Range: 2.0 - 0.4 = 1.6V
+            // Raw Range: 65535 - 13107 = 52428
+            raw_x = ((voltage - 0.40) / 1.60) * 52428.0 + 13107.0;
+          }
+
+          // 3. Safety Clamp (Max 20mA / 2.0V)
           if (raw_x > 65535.0)
             raw_x = 65535.0;
-          if (raw_x < 13107.0)
-            raw_x = 13107.0;
           // ============================================================
           // [PERBAIKAN FITUR FILTER PERIODE]
           // ============================================================
@@ -3248,7 +3257,7 @@ void setup()
     Serial.println("✅ ADS1115 Initialized");
     // int myGainConfig = 10;
     // ads.setGain((adsGain_t)myGainConfig);
-    ads.setGain(GAIN_ONE); // +/-6.144V
+    ads.setGain(GAIN_TWO); // +/-6.144V
   }
 
   printTime = millis();
