@@ -2070,10 +2070,10 @@ void handleEthernetClient()
           doc["filter"] = analogInput[id].filter;
           doc["filterPeriod"] = String(analogInput[id].filterPeriod, 2);
           doc["scaling"] = analogInput[id].scaling;
-          doc["lowLimit"] = analogInput[id].lowLimit;
-          doc["highLimit"] = analogInput[id].highLimit;
-          doc["mValue"] = analogInput[id].mValue;
-          doc["cValue"] = analogInput[id].cValue;
+          doc["lowLimit"] = String(analogInput[id].lowLimit, 2);
+          doc["highLimit"] = String(analogInput[id].highLimit, 2);
+          doc["mValue"] = String(analogInput[id].mValue, 6); // Gradient butuh presisi tinggi
+          doc["cValue"] = String(analogInput[id].cValue, 4);
           doc["calibration"] = analogInput[id].calibration;
           String res;
           serializeJson(doc, res);
@@ -3503,12 +3503,12 @@ void setupWebServer()
                 doc["filter"] = analogInput[id].filter;
                 doc["filterPeriod"] = (String(analogInput[id].filterPeriod, 2));
                 doc["scaling"] = analogInput[id].scaling;
-                doc["lowLimit"] = analogInput[id].lowLimit;
-                doc["highLimit"] = analogInput[id].highLimit;
+                doc["lowLimit"] = String(analogInput[id].lowLimit, 2); 
+                doc["highLimit"] = String(analogInput[id].highLimit, 2);
                 doc["name"] = analogInput[id].name;
                 doc["calibration"] = analogInput[id].calibration;
-                doc["mValue"] = analogInput[id].mValue;
-                doc["cValue"] = analogInput[id].cValue;
+                doc["mValue"] = String(analogInput[id].mValue, 6);
+                doc["cValue"] = String(analogInput[id].cValue, 4);
               }
               String dataLoad;
               serializeJson(doc, dataLoad);
