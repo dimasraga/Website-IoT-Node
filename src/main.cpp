@@ -1638,12 +1638,7 @@ String getPostValue(String data, String key)
     valEnd = data.length();
   return urlDecode(data.substring(valStart, valEnd));
 }
-// ============================================================================
-// ETHERNET WEB SERVER HANDLER (FIXED VERSION - ANTI HANG)
-// ============================================================================
-// ============================================================================
-// ETHERNET WEB SERVER HANDLER (FULL VERSION - FIXED)
-// ============================================================================
+
 void handleEthernetClient()
 {
   EthernetClient client = ethServer.available();
@@ -1958,29 +1953,38 @@ void handleEthernetClient()
 
       // --- 1. GET VALUE
       if (basePath == "/getValue")
+    {
+      String payload = "[";
+      bool first = true;
+      bool mutexTaken = false;
+
+      // 1. Generate the JSON String
+      if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(500))) 
       {
-        // Beri timeout agar tidak konflik dengan Modbus Task
-        if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100)))
+        mutexTaken = true;
+        if (!jsonSend.isNull() && jsonSend.size() > 0)
         {
-          // PERBAIKAN UTAMA:
-          // Langsung kirim (stream) isi jsonSend ke website.
-          // JANGAN diubah jadi Array, dan JANGAN ditampung di String (hemat RAM).
-          
-          if (jsonSend.isNull() || jsonSend.size() == 0) {
-             client.print("{}"); // Kirim object kosong jika belum ada data
-          } else {
-             serializeJson(jsonSend, client); // Streaming langsung
+          JsonObject root = jsonSend.as<JsonObject>();
+          for (JsonPair kv : root) {
+             String key = kv.key().c_str();
+             if (key == "-" || key == "") continue;
+             
+             if (!first) payload += ",";
+             payload += "{\"KodeSensor\":\"" + key + "\",\"Value\":\"" + kv.value().as<String>() + "\"}";
+             first = false;
           }
-          
-          xSemaphoreGive(jsonMutex);
         }
-        else
-        {
-          // Jika sistem sibuk, kirim Object Kosong "{}" 
-          // JANGAN kirim Array "[]" karena akan bikin website error
-          client.print("{}");
-        }
+        xSemaphoreGive(jsonMutex);
       }
+      payload += "]";
+
+      // 2. Send Payload
+      // Debugging: Print to Serial to verify data
+      // Serial.print("[Eth] Sending: "); Serial.println(payload);
+
+      // CRITICAL FIX: Do NOT send "HTTP/1.1 200 OK" here. It was already sent above.
+      client.print(payload); 
+    }
 
       // --- 2. GET CURRENT VALUE (ANALOG/DIGITAL REALTIME) ---
       else if (basePath == "/getCurrentValue")
@@ -2298,7 +2302,7 @@ void Task_NetworkManagement(void *parameter)
     // ============================================================
     if (networkSettings.networkMode == "Ethernet")
     {
-      if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(200)) == pdTRUE)
+      if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(1000)) == pdTRUE)
       {
         EthernetClient client = ethServer.available();
         if (client)
@@ -2875,12 +2879,6 @@ void Task_ModbusClient(void *parameter)
           if (dispName.length() > 15)
             dispName = dispName.substring(0, 15);
 
-          // CETAK BARIS DATA (Format Tabel Rapi)
-          // M%-2d  : Nomor urut (M1, M2...)
-          // %-15s  : Nama rata kiri 15 char
-          // %8.2f  : Nilai float (8 digit total, 2 desimal)
-          // %-5u   : Nilai Raw rata kiri
-          // %02d:%04d : Format Alamat (SlaveID:Register)
           Serial.printf("M%-2d| %-15s | %8.2f | %-5u | %02d:%-5d | %s\n",
                         i + 1,
                         dispName.c_str(),
@@ -3563,7 +3561,7 @@ void setupWebServer()
     }
     stringParam = "";
     serializeJson(jsonParam, stringParam);
-    jsonSend = DynamicJsonDocument(1024);
+    // jsonSend = DynamicJsonDocument(1024);
     request->send(200, "text/plain", "Succesfull");
     saveToJson("/modbusSetup.json","modbusSetup");
     Serial.println(stringParam); });
@@ -3578,15 +3576,26 @@ void setupWebServer()
       // Gunakan Mutex agar tidak crash saat membaca data live
       if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100))) 
       {
-          // Ambil data dari jsonSend (Variable Live Update) BUKAN sendString
-          serializeJson(jsonSend, realtimeJson); 
+          String realtimeJson = "[";
+          bool first = true;
+          JsonObject root = jsonSend.as<JsonObject>();
+          for (JsonPair kv : root) {
+             String key = kv.key().c_str();
+             if (key == "-" || key == "") continue;
+             
+             if (!first) realtimeJson += ",";
+             realtimeJson += "{\"KodeSensor\":\"" + key + "\",\"Value\":\"" + kv.value().as<String>() + "\"}";
+             first = false;
+          }
+          realtimeJson += "]";
           xSemaphoreGive(jsonMutex);
+          request->send(200, "application/json", realtimeJson);
       } 
       else 
       {
-          realtimeJson = "{}"; // Kirim kosong jika sistem sibuk
+          request->send(200, "application/json", "[]");
       }
-      request->send(200, "application/json", realtimeJson); });
+      });
   server.on("/getCurrentValue", HTTP_GET, [](AsyncWebServerRequest *request)
             {
       if (xSemaphoreTake(jsonMutex, pdMS_TO_TICKS(100))) 
